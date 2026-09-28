@@ -1,0 +1,24 @@
+{
+  "name": "mcp-platform",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "A company-wide MCP platform for servers, clients, gateways, and data connectors",
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/servers/workspace-tools.js",
+    "start:data-go": "node dist/servers/data-go-gateway.js",
+    "start:workspace": "node dist/servers/workspace-tools.js",
+    "start:gateway": "node dist/servers/data-go-gateway.js",
+    "typecheck": "tsc --noEmit",
+    "inspect": "npx @modelcontextprotocol/inspector node dist/servers/workspace-tools.js"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/server": "^2.0.0",
+    "zod": "^4.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "typescript": "^5.0.0"
+  }
+}

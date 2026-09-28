@@ -1,0 +1,19 @@
+# Local secrets
+.env
+.env.*
+!.env.example
+
+# Python caches and environments
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.venv/
+
+# Python build artifacts
+build/
+dist/
+*.egg-info/
+
+# Node dependencies
+node_modules/
