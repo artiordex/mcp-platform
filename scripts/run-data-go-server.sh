@@ -43,13 +43,14 @@ esac
 
 project_dir="$python_root"
 
-if ! command -v uv >/dev/null 2>&1; then
-  echo "uv is required. Install it from https://docs.astral.sh/uv/" >&2
+if [[ ! -f "$project_dir/pyproject.toml" ]]; then
+  echo "Unknown or missing Python MCP runtime: $project_dir" >&2
   exit 1
 fi
 
-if [[ ! -f "$project_dir/pyproject.toml" ]]; then
-  echo "Unknown or missing Python MCP runtime: $project_dir" >&2
+python_executable="$project_dir/.venv/bin/python"
+if [[ ! -x "$python_executable" ]]; then
+  echo "The local Python environment is missing. Run $mcp_root/scripts/setup-mcp-runtime.sh first." >&2
   exit 1
 fi
 
@@ -83,7 +84,7 @@ fi
 
 
 # Each selected server remains a separate process, while all local modules
-# share one maintained runtime project and virtual environment.
-export UV_PROJECT_ENVIRONMENT="$project_dir/.venv"
-
-exec uv run --project "$project_dir" --no-sync python "$mcp_root/scripts/run-data-go-python.py" "$python_module"
+# share one maintained runtime project and virtual environment. Runtime
+# startup uses the prepared interpreter directly so it does not need uv's
+# cache or lock files in the MCP host's home directory.
+exec "$python_executable" "$mcp_root/scripts/run-data-go-python.py" "$python_module"

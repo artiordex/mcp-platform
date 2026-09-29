@@ -3,6 +3,10 @@
 .env.*
 !.env.example
 
+# Local MCP server registry (copy the example and add local settings here)
+config/mcp-servers.json
+.playwright-mcp/
+
 # Python caches and environments
 __pycache__/
 *.py[cod]

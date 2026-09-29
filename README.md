@@ -44,6 +44,39 @@ codex mcp add workspace-tools \
   -- node /home/kreverse/projects/mcp-platform/dist/servers/workspace-tools.js
 ```
 
+### 범용 stdio MCP gateway
+
+`mcp-gateway`는 설정 파일에 적힌 외부 MCP 서버를 stdio 또는 Streamable HTTP로 연결하고, 각 서버의 `tools/list`과 `tools/call`을 하나의 MCP 서버로 합쳐 제공합니다. Playwright MCP와 아래 공공데이터 launcher를 함께 등록하는 예시가 포함됩니다.
+
+```bash
+npm install
+npm run build
+./scripts/setup-mcp-runtime.sh
+cp config/mcp-servers.example.json config/mcp-servers.json
+# 필요한 API 키를 환경변수로 설정하거나 .env에 입력
+./scripts/run-mcp-gateway.sh
+```
+
+Playwright MCP를 사용할 경우, 먼저 Playwright 버전에 맞는 브라우저를 설치합니다.
+이 명령은 브라우저를 사용자 캐시에 설치하며 시스템 Chrome 설치를 요구하지 않습니다.
+
+```bash
+npx --yes @playwright/mcp@latest install-browser chromium
+```
+
+`config/mcp-servers.json`은 git에 추적하지 않습니다. 설정은 `MCP_SERVERS_CONFIG`로 다른 JSON 파일을 지정할 수 있고, stdio 서버의 상대 `cwd`는 저장소 루트 기준입니다. `envPassthrough`에 적은 환경변수만 stdio child process에 추가 전달됩니다. Streamable HTTP 서버는 `headersFromEnv` 설정으로 헤더별 비밀 환경변수를 연결합니다. 자격증명을 URL에 직접 넣지 마세요. SDK가 PATH, HOME 등 실행에 필요한 안전 기본 항목은 별도로 제공합니다.
+
+Playwright 항목은 headless Chromium으로 `npx --yes @playwright/mcp@latest`를 실행합니다. 최초 실행에는 Node.js 20 이상과 npm registry 접근이 필요합니다. 브라우저 실행에는 앞의 Playwright Chromium 설치 단계가 필요합니다. 실행 시작 후 도구 이름은 `mcp_<server-id>_<tool-name>` 형식으로 노출됩니다. [Playwright MCP 공식 안내](https://github.com/microsoft/playwright/blob/main/docs/src/getting-started-mcp.md)를 참고하세요.
+
+Codex 등록은 빌드와 설정 파일 준비 후 실행합니다.
+
+```bash
+codex mcp add mcp-platform \
+  -- /home/kreverse/projects/mcp-platform/scripts/run-mcp-gateway.sh
+```
+
+Playwright 예시는 현재 로컬 브라우저 프로세스로 실행하고, 원격 MCP 예시 항목은 `enabled: false`로 시작합니다. 원격 연결을 쓰려면 URL과 `headersFromEnv`를 설정하고 해당 환경변수를 주입하세요.
+
 ### Python MCP runtime
 
 Data.go.kr와 기타 외부 연동 코드는 다음 Python runtime에서 직접 관리합니다.

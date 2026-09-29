@@ -1,33 +1,34 @@
-import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
-import { createInterface, type Interface } from 'node:readline';
-
-import type { CallToolResult } from '@modelcontextprotocol/server';
+import {
+  Client,
+  StreamableHTTPClientTransport,
+  type CallToolResult,
+  type Tool,
+  type Transport,
+} from '@modelcontextprotocol/client';
+import {
+  StdioClientTransport,
+  type StdioServerParameters,
+} from '@modelcontextprotocol/client/stdio';
+import { type Stream } from 'node:stream';
 
 export type JsonObject = Record<string, unknown>;
-type JsonRpcId = number | string;
 
-type JsonRpcResponse = {
-  jsonrpc?: string;
-  id?: JsonRpcId | null;
-  result?: unknown;
-  error?: {
-    code: number;
-    message: string;
-    data?: unknown;
-  };
-};
+export type ChildMcpServerConfig =
+  | (Pick<StdioServerParameters, 'command' | 'args' | 'cwd' | 'maxBufferSize'> & {
+      transport?: 'stdio';
+      /** Parent environment variables that this child is allowed to receive. */
+      envPassthrough?: string[];
+      requestTimeoutMs?: number;
+    })
+  | {
+      transport: 'streamable-http';
+      url: string;
+      /** HTTP header name to parent environment variable name. */
+      headersFromEnv?: Record<string, string>;
+      requestTimeoutMs?: number;
+    };
 
-type PendingRequest = {
-  resolve: (value: unknown) => void;
-  reject: (error: Error) => void;
-  timer: NodeJS.Timeout;
-};
-
-export type ChildTool = {
-  name: string;
-  description?: string;
-  inputSchema?: JsonObject;
-};
+export type ChildTool = Pick<Tool, 'name' | 'description' | 'inputSchema'>;
 
 export function isJsonObject(value: unknown): value is JsonObject {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
@@ -49,184 +50,125 @@ export function describeError(value: unknown): string {
   }
 }
 
+function selectedEnvironment(names: string[]): Record<string, string> {
+  const environment: Record<string, string> = {};
+  for (const name of names) {
+    const value = process.env[name];
+    if (value !== undefined) {
+      environment[name] = value;
+    }
+  }
+  return environment;
+}
+
+function redactSecrets(text: string, secrets: string[]): string {
+  return secrets
+    .filter((secret) => secret.length > 0)
+    .sort((left, right) => right.length - left.length)
+    .reduce((result, secret) => {
+      const encoded = encodeURIComponent(secret);
+      return result
+        .split(secret).join('[REDACTED]')
+        .split(encoded).join('[REDACTED]');
+    }, text);
+}
+
 /**
- * A small stdio MCP client used by gateway processes to supervise child MCP
- * servers. This is intentionally independent from any specific data source.
+ * A reusable MCP client for supervising configured child servers.
+ * The official SDK owns protocol negotiation, JSON-RPC framing, timeouts,
+ * pagination, and process shutdown.
  */
 export class ChildMcpClient {
-  private readonly child: ChildProcessWithoutNullStreams;
-  private readonly output: Interface;
-  private readonly pending = new Map<JsonRpcId, PendingRequest>();
-  private nextRequestId = 1;
+  private readonly client: Client;
+  private readonly transport: Transport;
+  private readonly requestTimeoutMs: number;
+  private readonly secrets: string[] = [];
   private closed = false;
+  private closing: Promise<void> | undefined;
 
   constructor(
     private readonly serverId: string,
     private readonly label: string,
-    launcherPath: string,
-    private readonly requestTimeoutMs = 30_000,
+    config: ChildMcpServerConfig,
   ) {
-    this.child = spawn('/bin/bash', [launcherPath], {
-      env: { ...process.env },
-      stdio: 'pipe',
-    });
-
-    this.output = createInterface({ input: this.child.stdout });
-    this.output.on('line', (line) => this.handleLine(line));
-
-    this.child.stderr.setEncoding('utf8');
-    this.child.stderr.on('data', (chunk: string) => {
-      process.stderr.write(`[mcp-platform:${this.serverId}] ${chunk}`);
-    });
-
-    this.child.on('error', (error) => this.failPending(error));
-    this.child.on('exit', (code, signal) => {
-      if (!this.closed) {
-        this.failPending(
-          new Error(
-            `${this.label} exited before completing the request (code=${code}, signal=${signal})`,
-          ),
-        );
-      }
-    });
-  }
-
-  private handleLine(line: string): void {
-    if (line.trim().length === 0) {
-      return;
-    }
-
-    let message: JsonRpcResponse;
-    try {
-      message = JSON.parse(line) as JsonRpcResponse;
-    } catch (error) {
-      process.stderr.write(
-        `[mcp-platform:${this.serverId}] Ignoring non-JSON stdout: ${describeError(error)}\n`,
-      );
-      return;
-    }
-
-    if (message.id === undefined || message.id === null) {
-      return;
-    }
-
-    const pending = this.pending.get(message.id);
-    if (!pending) {
-      return;
-    }
-
-    this.pending.delete(message.id);
-    clearTimeout(pending.timer);
-
-    if (message.error) {
-      pending.reject(
-        new Error(
-          `${this.label} returned MCP error ${message.error.code}: ${message.error.message}`,
-        ),
-      );
-      return;
-    }
-
-    pending.resolve(message.result);
-  }
-
-  private failPending(error: Error): void {
-    for (const pending of this.pending.values()) {
-      clearTimeout(pending.timer);
-      pending.reject(error);
-    }
-    this.pending.clear();
-  }
-
-  private request<T>(method: string, params: JsonObject = {}): Promise<T> {
-    if (this.closed) {
-      return Promise.reject(new Error(`${this.label} is closed`));
-    }
-
-    const id = this.nextRequestId++;
-    const message = `${JSON.stringify({
-      jsonrpc: '2.0',
-      id,
-      method,
-      params,
-    })}\n`;
-
-    return new Promise<T>((resolve, reject) => {
-      const timer = setTimeout(() => {
-        this.pending.delete(id);
-        reject(new Error(`${this.label} timed out during ${method}`));
-      }, this.requestTimeoutMs);
-
-      this.pending.set(id, {
-        resolve: (value) => resolve(value as T),
-        reject,
-        timer,
-      });
-      this.child.stdin.write(message, (error) => {
-        if (!error) {
-          return;
+    this.requestTimeoutMs = config.requestTimeoutMs ?? 30_000;
+    this.client = new Client({ name: 'mcp-platform-gateway', version: '0.1.0' });
+    if (config.transport === 'streamable-http') {
+      const headers: Record<string, string> = {};
+      for (const [headerName, environmentName] of Object.entries(
+        config.headersFromEnv ?? {},
+      )) {
+        const value = process.env[environmentName];
+        if (value !== undefined) {
+          headers[headerName] = value;
+          this.secrets.push(value);
         }
-
-        this.pending.delete(id);
-        clearTimeout(timer);
-        reject(error);
+      }
+      const url = new URL(config.url);
+      this.transport = new StreamableHTTPClientTransport(url, {
+        requestInit: { headers },
       });
-    });
-  }
-
-  private notify(method: string, params: JsonObject = {}): void {
-    if (this.closed) {
-      return;
+    } else {
+      const env = selectedEnvironment(config.envPassthrough ?? []);
+      this.secrets.push(...Object.values(env));
+      const stdioTransport = new StdioClientTransport({
+        command: config.command,
+        args: config.args,
+        cwd: config.cwd,
+        env,
+        maxBufferSize: config.maxBufferSize,
+        stderr: 'pipe',
+      });
+      this.transport = stdioTransport;
+      const stderr = stdioTransport.stderr;
+      if (stderr) {
+        this.pipeChildStderr(stderr);
+      }
     }
 
-    this.child.stdin.write(
-      `${JSON.stringify({ jsonrpc: '2.0', method, params })}\n`,
-    );
+    this.transport.onerror = (error) => {
+      process.stderr.write(
+        `[mcp-platform:${this.serverId}] ${redactSecrets(error.message, this.secrets)}\n`,
+      );
+    };
+  }
+
+  private pipeChildStderr(stderr: Stream): void {
+    stderr.on('data', (chunk: Buffer | string) => {
+      const message = redactSecrets(String(chunk), this.secrets);
+      process.stderr.write(`[mcp-platform:${this.serverId}] ${message}`);
+    });
   }
 
   async initialize(): Promise<void> {
-    await this.request('initialize', {
-      protocolVersion: '2024-11-05',
-      capabilities: {},
-      clientInfo: {
-        name: 'mcp-platform-gateway',
-        version: '0.1.0',
-      },
-    });
-    this.notify('notifications/initialized');
+    await this.client.connect(this.transport, { timeout: this.requestTimeoutMs });
   }
 
   async listTools(): Promise<ChildTool[]> {
-    const tools: ChildTool[] = [];
-    let cursor: string | undefined;
-
-    do {
-      const result = await this.request<{ tools?: ChildTool[]; nextCursor?: string }>(
-        'tools/list',
-        cursor ? { cursor } : {},
-      );
-      tools.push(...(result.tools ?? []));
-      cursor = result.nextCursor;
-    } while (cursor);
-
-    return tools;
+    const result = await this.client.listTools({}, { timeout: this.requestTimeoutMs });
+    return result.tools;
   }
 
   async callTool(toolName: string, args: unknown): Promise<CallToolResult> {
-    return this.request<CallToolResult>('tools/call', {
-      name: toolName,
-      arguments: isJsonObject(args) ? args : {},
-    });
+    return this.client.callTool(
+      {
+        name: toolName,
+        arguments: isJsonObject(args) ? args : {},
+      },
+      { timeout: this.requestTimeoutMs },
+    );
   }
 
-  close(): void {
+  close(): Promise<void> {
+    if (this.closing) {
+      return this.closing;
+    }
     if (this.closed) {
-      return;
+      return Promise.resolve();
     }
 
     this.closed = true;
-    this.failPending(new Error(`${this.label} closed`));
-    this.output.close();
-    this.child.kill('SIGTERM');
+    this.closing = this.client.close();
+    return this.closing;
   }
 }

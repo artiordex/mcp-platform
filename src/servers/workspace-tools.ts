@@ -34,8 +34,36 @@ function resolveWorkspacePath(relativePath: string): string {
   return resolved;
 }
 
+function assertVisiblePath(relativePath: string): void {
+  const segments = relativePath.split(path.sep).filter(Boolean);
+  if (segments.some((segment) => segment.startsWith('.') || ignoredDirectories.has(segment))) {
+    throw new Error('Hidden files and dependency directories are not accessible.');
+  }
+}
+
+async function resolveAccessiblePath(
+  relativePath: string,
+): Promise<{ absolutePath: string; relativePath: string }> {
+  const requestedPath = resolveWorkspacePath(relativePath);
+  const requestedRelativePath = path.relative(workspaceRoot, requestedPath);
+  assertVisiblePath(requestedRelativePath);
+
+  const [realWorkspaceRoot, realPath] = await Promise.all([
+    fs.realpath(workspaceRoot),
+    fs.realpath(requestedPath),
+  ]);
+  const realRelativePath = path.relative(realWorkspaceRoot, realPath);
+  if (realRelativePath.startsWith('..') || path.isAbsolute(realRelativePath)) {
+    throw new Error('The requested path resolves outside the workspace.');
+  }
+  assertVisiblePath(realRelativePath);
+
+  return { absolutePath: realPath, relativePath: realRelativePath };
+}
+
 async function collectFiles(
   directory: string,
+  realWorkspaceRoot: string,
   maxDepth: number,
   currentDepth = 0,
 ): Promise<string[]> {
@@ -51,13 +79,13 @@ async function collectFiles(
 
     const entryPath = path.join(directory, entry.name);
     if (entry.isFile()) {
-      files.push(path.relative(workspaceRoot, entryPath));
+      files.push(path.relative(realWorkspaceRoot, entryPath));
       continue;
     }
 
     if (entry.isDirectory() && currentDepth < maxDepth) {
       files.push(
-        ...(await collectFiles(entryPath, maxDepth, currentDepth + 1)),
+        ...(await collectFiles(entryPath, realWorkspaceRoot, maxDepth, currentDepth + 1)),
       );
     }
   }
@@ -121,7 +149,8 @@ function createServer(): McpServer {
       }),
     },
     async ({ path: relativePath, maxDepth }) => {
-      const directory = resolveWorkspacePath(relativePath);
+      const { absolutePath: directory } = await resolveAccessiblePath(relativePath);
+      const realWorkspaceRoot = await fs.realpath(workspaceRoot);
       const stats = await fs.stat(directory);
       if (!stats.isDirectory()) {
         return {
@@ -130,7 +159,7 @@ function createServer(): McpServer {
         };
       }
 
-      const files = await collectFiles(directory, maxDepth);
+      const files = await collectFiles(directory, realWorkspaceRoot, maxDepth);
       return {
         content: [
           {
@@ -146,13 +175,14 @@ function createServer(): McpServer {
     'read_project_file',
     {
       description:
-        'Read a UTF-8 text file using a workspace-relative path. Reads are limited to 256 KiB and stay inside the workspace root.',
+        'Read a visible UTF-8 text file using a workspace-relative path. Hidden files, dependency directories, and paths that resolve outside the workspace are blocked. Reads are limited to 256 KiB.',
       inputSchema: z.object({
         path: z.string().min(1).describe('Workspace-relative file path'),
       }),
     },
     async ({ path: relativePath }) => {
-      const filePath = resolveWorkspacePath(relativePath);
+      const { absolutePath: filePath, relativePath: visibleRelativePath } =
+        await resolveAccessiblePath(relativePath);
       const stats = await fs.stat(filePath);
       if (!stats.isFile()) {
         return {
@@ -176,7 +206,7 @@ function createServer(): McpServer {
           {
             type: 'text',
             text: [
-              `# ${path.relative(workspaceRoot, filePath)}`,
+              `# ${visibleRelativePath}`,
               truncated ? '(truncated at 256 KiB)' : '',
               '',
               text,

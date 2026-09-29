@@ -1,0 +1,78 @@
+{
+  "name": "mcp-platform",
+  "servers": [
+    {
+      "id": "playwright",
+      "label": "Playwright browser automation",
+      "transport": "stdio",
+      "command": "npx",
+      "args": [
+        "--yes",
+        "@playwright/mcp@latest",
+        "--headless",
+        "--browser",
+        "chromium"
+      ],
+      "requestTimeoutMs": 120000
+    },
+    {
+      "id": "internal_remote",
+      "label": "Example remote MCP server",
+      "enabled": false,
+      "transport": "streamable-http",
+      "url": "https://mcp.example.com/mcp",
+      "headersFromEnv": {
+        "Authorization": "MCP_REMOTE_BEARER_TOKEN"
+      },
+      "requestTimeoutMs": 60000
+    },
+    {
+      "id": "data_go_nps",
+      "label": "NPS business enrollment",
+      "transport": "stdio",
+      "command": "/bin/bash",
+      "args": ["scripts/run-data-go-nps.sh"],
+      "envPassthrough": ["DATA_GO_API_KEY", "API_KEY"]
+    },
+    {
+      "id": "data_go_nts",
+      "label": "NTS business verification",
+      "transport": "stdio",
+      "command": "/bin/bash",
+      "args": ["scripts/run-data-go-nts.sh"],
+      "envPassthrough": ["DATA_GO_API_KEY", "API_KEY"]
+    },
+    {
+      "id": "data_go_pps",
+      "label": "PPS Narajangteo",
+      "transport": "stdio",
+      "command": "/bin/bash",
+      "args": ["scripts/run-data-go-pps.sh"],
+      "envPassthrough": ["DATA_GO_API_KEY", "API_KEY"]
+    },
+    {
+      "id": "data_go_fsc",
+      "label": "FSC financial information",
+      "transport": "stdio",
+      "command": "/bin/bash",
+      "args": ["scripts/run-data-go-fsc.sh"],
+      "envPassthrough": ["DATA_GO_API_KEY", "API_KEY"]
+    },
+    {
+      "id": "data_go_catalog",
+      "label": "Public Data Portal catalog",
+      "transport": "stdio",
+      "command": "/bin/bash",
+      "args": ["scripts/run-data-go-catalog.sh"],
+      "envPassthrough": ["DATA_GO_API_KEY", "API_KEY"]
+    },
+    {
+      "id": "food_safety",
+      "label": "Food Safety Korea",
+      "transport": "stdio",
+      "command": "/bin/bash",
+      "args": ["scripts/run-data-go-food-safety.sh"],
+      "envPassthrough": ["FOOD_SAFETY_API_KEY", "FOOD_API_KEY"]
+    }
+  ]
+}

@@ -8,13 +8,17 @@
     "build": "tsc",
     "start": "node dist/servers/workspace-tools.js",
     "start:data-go": "node dist/servers/data-go-gateway.js",
+    "start:mcp-gateway": "node dist/servers/mcp-gateway.js",
+    "start:http-gateway": "node dist/servers/http-gateway.js",
     "start:workspace": "node dist/servers/workspace-tools.js",
     "start:gateway": "node dist/servers/data-go-gateway.js",
     "typecheck": "tsc --noEmit",
-    "inspect": "npx @modelcontextprotocol/inspector node dist/servers/workspace-tools.js"
+    "inspect": "npx @modelcontextprotocol/inspector node dist/servers/workspace-tools.js",
+    "test": "npm run build && node --test tests/*.test.mjs"
   },
   "dependencies": {
-    "@modelcontextprotocol/server": "^2.0.0",
+    "@modelcontextprotocol/client": "^2.2.0",
+    "@modelcontextprotocol/server": "^2.2.0",
     "zod": "^4.0.0"
   },
   "devDependencies": {

@@ -3,7 +3,9 @@ from __future__ import annotations
 import asyncio
 
 import pytest
+import httpx
 
+from mcp_platform.core import common
 from mcp_platform.servers import food_safety, fsc, nps, nts, pps, portal_catalog
 
 
@@ -135,3 +137,62 @@ def test_food_safety_response_normalizes_service_envelope(monkeypatch):
     )
     assert result["total_count"] == 1
     assert result["items"][0]["PRDLST_NM"] == "김치"
+
+
+def test_service_key_prefers_data_go_key_over_legacy_alias(monkeypatch):
+    monkeypatch.setenv("DATA_GO_API_KEY", "preferred-data-key")
+    monkeypatch.setenv("API_KEY", "legacy-key")
+    assert common.service_key() == "preferred-data-key"
+
+
+def test_provider_error_message_redacts_configured_api_key(monkeypatch):
+    secret = "food-secret-key"
+    monkeypatch.setenv("FOOD_SAFETY_API_KEY", secret)
+
+    with pytest.raises(common.DataGoError) as error:
+        common.response_body(
+            {
+                "response": {
+                    "header": {
+                        "resultCode": "99",
+                        "resultMsg": f"request rejected for {secret}",
+                    },
+                    "body": {},
+                }
+            }
+        )
+
+    assert secret not in str(error.value)
+    assert "[REDACTED]" in str(error.value)
+
+
+def test_http_status_error_does_not_expose_url_or_response_body(monkeypatch):
+    secret = "service-key-in-path"
+    url = f"https://api.example.test/{secret}/json"
+    monkeypatch.setenv("FOOD_SAFETY_API_KEY", secret)
+
+    class FailingClient:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, traceback):
+            return False
+
+        async def get(self, request_url, **kwargs):
+            response = httpx.Response(
+                403,
+                text=f"provider echoed {secret}",
+                request=httpx.Request("GET", request_url),
+            )
+            return response
+
+    monkeypatch.setattr(common.httpx, "AsyncClient", lambda **kwargs: FailingClient())
+
+    with pytest.raises(common.DataGoError) as error:
+        run(common.get_json(url))
+
+    message = str(error.value)
+    assert "403" in message
+    assert secret not in message
+    assert "api.example.test" not in message
+    assert "provider echoed" not in message

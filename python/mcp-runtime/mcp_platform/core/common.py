@@ -6,6 +6,7 @@ import os
 import logging
 from collections.abc import Mapping
 from typing import Any
+from urllib.parse import quote, quote_plus
 
 import httpx
 from dotenv import load_dotenv
@@ -26,8 +27,34 @@ class DataGoError(RuntimeError):
     """An API or configuration error that can be shown to an MCP caller."""
 
 
+_SECRET_ENV_NAMES = (
+    "API_KEY",
+    "DATA_GO_API_KEY",
+    "FOOD_SAFETY_API_KEY",
+    "FOOD_API_KEY",
+)
+
+
+def redact_sensitive(value: Any) -> str:
+    text = str(value)
+    secrets: set[str] = set()
+    for name in _SECRET_ENV_NAMES:
+        secret = os.getenv(name)
+        if secret and len(secret) >= 4:
+            secrets.update(
+                {
+                    secret,
+                    quote(secret, safe=""),
+                    quote_plus(secret, safe=""),
+                }
+            )
+    for secret in sorted(secrets, key=len, reverse=True):
+        text = text.replace(secret, "[REDACTED]")
+    return text
+
+
 def service_key() -> str:
-    key = os.getenv("API_KEY") or os.getenv("DATA_GO_API_KEY")
+    key = os.getenv("DATA_GO_API_KEY") or os.getenv("API_KEY")
     if not key:
         raise DataGoError(
             "DATA_GO_API_KEY is not configured. Put it in the repository .env "
@@ -63,7 +90,7 @@ def response_body(payload: Any) -> dict[str, Any]:
         code = str(header.get("resultCode", header.get("result_code", "00")))
         if code not in {"00", "0", "OK", "ok"}:
             message = header.get("resultMsg", header.get("result_msg", "Unknown API error"))
-            raise DataGoError(f"API error [{code}]: {message}")
+            raise DataGoError(redact_sensitive(f"API error [{code}]: {message}"))
 
     body = response.get("body", response)
     if not isinstance(body, Mapping):
@@ -77,7 +104,7 @@ def parse_xml_envelope(text: str) -> dict[str, Any]:
     except DataGoError:
         raise
     except Exception as exc:  # pragma: no cover - parser-specific detail
-        raise DataGoError(f"Could not parse XML API response: {exc}") from exc
+        raise DataGoError("Could not parse XML API response") from exc
 
 
 async def get_json(
@@ -93,12 +120,12 @@ async def get_json(
             return response.json()
         except httpx.HTTPStatusError as exc:
             raise DataGoError(
-                f"HTTP {exc.response.status_code} from {url}: {exc.response.text[:500]}"
+                f"HTTP {exc.response.status_code} from configured API endpoint"
             ) from exc
         except httpx.RequestError as exc:
-            raise DataGoError(f"Could not reach {url}: {exc}") from exc
+            raise DataGoError("Could not reach configured API endpoint") from exc
         except ValueError as exc:
-            raise DataGoError(f"API returned invalid JSON from {url}: {exc}") from exc
+            raise DataGoError("API returned invalid JSON") from exc
 
 
 async def post_json(
@@ -120,12 +147,12 @@ async def post_json(
             return response.json()
         except httpx.HTTPStatusError as exc:
             raise DataGoError(
-                f"HTTP {exc.response.status_code} from {url}: {exc.response.text[:500]}"
+                f"HTTP {exc.response.status_code} from configured API endpoint"
             ) from exc
         except httpx.RequestError as exc:
-            raise DataGoError(f"Could not reach {url}: {exc}") from exc
+            raise DataGoError("Could not reach configured API endpoint") from exc
         except ValueError as exc:
-            raise DataGoError(f"API returned invalid JSON from {url}: {exc}") from exc
+            raise DataGoError("API returned invalid JSON") from exc
 
 
 async def get_xml(
@@ -143,10 +170,10 @@ async def get_xml(
             raise
         except httpx.HTTPStatusError as exc:
             raise DataGoError(
-                f"HTTP {exc.response.status_code} from {url}: {exc.response.text[:500]}"
+                f"HTTP {exc.response.status_code} from configured API endpoint"
             ) from exc
         except httpx.RequestError as exc:
-            raise DataGoError(f"Could not reach {url}: {exc}") from exc
+            raise DataGoError("Could not reach configured API endpoint") from exc
 
 
 def int_value(value: Any, default: int = 0) -> int:
@@ -163,4 +190,4 @@ def text_value(value: Any) -> str | None:
 
 
 def error_result(exc: Exception, **fields: Any) -> dict[str, Any]:
-    return {"error": str(exc), **fields}
+    return {"error": redact_sensitive(exc), **fields}
