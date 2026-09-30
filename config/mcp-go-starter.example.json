@@ -1,0 +1,13 @@
+{
+  "name": "mcp-platform-go-starter-gateway",
+  "servers": [
+    {
+      "id": "go_starter",
+      "label": "Go MCP starter",
+      "transport": "stdio",
+      "command": "/bin/bash",
+      "args": ["scripts/run-mcp-go-server.sh"],
+      "cwd": "."
+    }
+  ]
+}

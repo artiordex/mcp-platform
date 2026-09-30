@@ -1,3 +1,12 @@
+/**
+ * 파일명: workspace-tools.ts
+ * 경로: src/servers/workspace-tools.ts
+ * 목적: 로컬 워크스페이스 내 프로젝트 파일 구조 탐색 및 안전한 읽기 전용 도구를 제공함
+ * 작성자: AI전략팀
+ * 작성일: 2026-09-30
+ * 수정일: 2026-09-30
+ */
+
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
 
@@ -17,9 +26,12 @@ const ignoredDirectories = new Set([
   '.cache',
 ]);
 
+/**
+ * 상대경로를 워크스페이스 절대경로로 해석하고 상위 탈출을 차단함
+ */
 function resolveWorkspacePath(relativePath: string): string {
   if (relativePath.includes('\0')) {
-    throw new Error('The path contains a null byte.');
+    throw new Error('경로에 널 바이트가 포함됨');
   }
 
   const resolved = path.resolve(workspaceRoot, relativePath);
@@ -28,19 +40,25 @@ function resolveWorkspacePath(relativePath: string): string {
     relativeToRoot.startsWith('..') ||
     path.isAbsolute(relativeToRoot)
   ) {
-    throw new Error('The requested path is outside the workspace.');
+    throw new Error('요청한 경로가 워크스페이스 범위를 벗어남');
   }
 
   return resolved;
 }
 
+/**
+ * 숨김 파일 및 의존성 디렉터리 접근 여부를 검증함
+ */
 function assertVisiblePath(relativePath: string): void {
   const segments = relativePath.split(path.sep).filter(Boolean);
   if (segments.some((segment) => segment.startsWith('.') || ignoredDirectories.has(segment))) {
-    throw new Error('Hidden files and dependency directories are not accessible.');
+    throw new Error('숨김 파일 및 의존성 디렉터리는 접근할 수 없음');
   }
 }
 
+/**
+ * 심볼릭 링크를 해제하고 실제 워크스페이스 내부의 안전한 경로인지 검증함
+ */
 async function resolveAccessiblePath(
   relativePath: string,
 ): Promise<{ absolutePath: string; relativePath: string }> {
@@ -54,13 +72,16 @@ async function resolveAccessiblePath(
   ]);
   const realRelativePath = path.relative(realWorkspaceRoot, realPath);
   if (realRelativePath.startsWith('..') || path.isAbsolute(realRelativePath)) {
-    throw new Error('The requested path resolves outside the workspace.');
+    throw new Error('해석된 실제 경로가 워크스페이스 범위를 벗어남');
   }
   assertVisiblePath(realRelativePath);
 
   return { absolutePath: realPath, relativePath: realRelativePath };
 }
 
+/**
+ * 디렉터리를 재귀 탐색하여 숨김 제외 가시 파일 목록을 수집함
+ */
 async function collectFiles(
   directory: string,
   realWorkspaceRoot: string,
@@ -93,6 +114,9 @@ async function collectFiles(
   return files;
 }
 
+/**
+ * 워크스페이스 도구 MCP 서버 인스턴스를 생성함
+ */
 function createServer(): McpServer {
   const server = new McpServer({
     name: 'workspace-tools',
@@ -103,7 +127,7 @@ function createServer(): McpServer {
     'workspace_status',
     {
       description:
-        'Return basic information about the configured workspace root. This tool is read-only.',
+        '설정된 워크스페이스 루트의 기본 상태와 최상위 항목 목록을 반환함 (읽기 전용임)',
       inputSchema: z.object({}),
     },
     async () => {
@@ -136,16 +160,16 @@ function createServer(): McpServer {
     'list_project_files',
     {
       description:
-        'List visible files under a workspace-relative directory. The tool is read-only and skips hidden, dependency, and virtual-environment directories.',
+        '지정한 워크스페이스 상대 디렉터리의 가시 파일 목록을 반환함 (읽기 전용이며 숨김 폴더 및 의존성 제외함)',
       inputSchema: z.object({
-        path: z.string().default('.').describe('Workspace-relative directory'),
+        path: z.string().default('.').describe('워크스페이스 기준 상대 디렉터리 경로임'),
         maxDepth: z
           .number()
           .int()
           .min(0)
           .max(4)
           .default(2)
-          .describe('Maximum directory depth to traverse'),
+          .describe('탐색할 최대 하위 디렉터리 깊이임'),
       }),
     },
     async ({ path: relativePath, maxDepth }) => {
@@ -154,7 +178,7 @@ function createServer(): McpServer {
       const stats = await fs.stat(directory);
       if (!stats.isDirectory()) {
         return {
-          content: [{ type: 'text', text: 'The requested path is not a directory.' }],
+          content: [{ type: 'text', text: '요청한 경로가 디렉터리가 아님' }],
           isError: true,
         };
       }
@@ -164,7 +188,7 @@ function createServer(): McpServer {
         content: [
           {
             type: 'text',
-            text: files.length > 0 ? files.join('\n') : '(no visible files)',
+            text: files.length > 0 ? files.join('\n') : '(표시 가능한 파일 없음)',
           },
         ],
       };
@@ -175,9 +199,9 @@ function createServer(): McpServer {
     'read_project_file',
     {
       description:
-        'Read a visible UTF-8 text file using a workspace-relative path. Hidden files, dependency directories, and paths that resolve outside the workspace are blocked. Reads are limited to 256 KiB.',
+        '워크스페이스 상대경로를 이용해 UTF-8 텍스트 파일 내용을 읽어옴 (최대 256 KiB 제한함)',
       inputSchema: z.object({
-        path: z.string().min(1).describe('Workspace-relative file path'),
+        path: z.string().min(1).describe('워크스페이스 기준 상대 파일 경로임'),
       }),
     },
     async ({ path: relativePath }) => {
@@ -186,7 +210,7 @@ function createServer(): McpServer {
       const stats = await fs.stat(filePath);
       if (!stats.isFile()) {
         return {
-          content: [{ type: 'text', text: 'The requested path is not a file.' }],
+          content: [{ type: 'text', text: '요청한 경로가 일반 파일이 아님' }],
           isError: true,
         };
       }
@@ -194,7 +218,7 @@ function createServer(): McpServer {
       const contents = await fs.readFile(filePath);
       if (contents.includes(0)) {
         return {
-          content: [{ type: 'text', text: 'Binary files are not supported.' }],
+          content: [{ type: 'text', text: '바이너리 파일은 읽을 수 없음' }],
           isError: true,
         };
       }
@@ -207,7 +231,7 @@ function createServer(): McpServer {
             type: 'text',
             text: [
               `# ${visibleRelativePath}`,
-              truncated ? '(truncated at 256 KiB)' : '',
+              truncated ? '(256 KiB 초과로 축약됨)' : '',
               '',
               text,
             ].join('\n'),

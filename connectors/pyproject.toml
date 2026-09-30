@@ -1,7 +1,7 @@
 [project]
-name = "mcp-platform-python"
+name = "mcp-platform-connectors"
 version = "0.1.0"
-description = "Python MCP runtime, core services, and external data connectors"
+description = "MCP platform external data connectors and shared runtime"
 requires-python = ">=3.10"
 dependencies = [
     "httpx>=0.28.1",

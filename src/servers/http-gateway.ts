@@ -1,3 +1,12 @@
+/**
+ * 파일명: http-gateway.ts
+ * 경로: src/servers/http-gateway.ts
+ * 목적: 사내 웹 포털(8080/mcp) 및 외부 HTTP 클라이언트 연동용 REST/JSON 게이트웨이를 제공함
+ * 작성자: AI전략팀
+ * 작성일: 2026-09-30
+ * 수정일: 2026-09-30
+ */
+
 import { promises as fs } from 'node:fs';
 import http from 'node:http';
 import path from 'node:path';
@@ -15,27 +24,36 @@ const ignoredDirectories = new Set([
   '.cache',
 ]);
 
+/**
+ * 상대경로를 워크스페이스 절대경로로 변환하고 상위 경로 탈출을 차단함
+ */
 function resolveWorkspacePath(relativePath: string): string {
   if (relativePath.includes('\0')) {
-    throw new Error('The path contains a null byte.');
+    throw new Error('경로에 널 바이트가 포함됨');
   }
 
   const resolved = path.resolve(workspaceRoot, relativePath);
   const relativeToRoot = path.relative(workspaceRoot, resolved);
   if (relativeToRoot.startsWith('..') || path.isAbsolute(relativeToRoot)) {
-    throw new Error('The requested path is outside the workspace.');
+    throw new Error('요청한 경로가 워크스페이스 범위를 벗어남');
   }
 
   return resolved;
 }
 
+/**
+ * 숨김 및 의존성 디렉터리 접근 여부를 검증함
+ */
 function assertVisiblePath(relativePath: string): void {
   const segments = relativePath.split(path.sep).filter(Boolean);
   if (segments.some((segment) => segment.startsWith('.') || ignoredDirectories.has(segment))) {
-    throw new Error('Hidden files and dependency directories are not accessible.');
+    throw new Error('숨김 파일 및 의존성 디렉터리는 접근할 수 없음');
   }
 }
 
+/**
+ * 실제 물리 경로가 워크스페이스 내부인지 검증함
+ */
 async function resolveAccessiblePath(
   relativePath: string,
 ): Promise<{ absolutePath: string; relativePath: string }> {
@@ -49,13 +67,16 @@ async function resolveAccessiblePath(
   ]);
   const realRelativePath = path.relative(realWorkspaceRoot, realPath);
   if (realRelativePath.startsWith('..') || path.isAbsolute(realRelativePath)) {
-    throw new Error('The requested path resolves outside the workspace.');
+    throw new Error('해석된 실제 경로가 워크스페이스 범위를 벗어남');
   }
   assertVisiblePath(realRelativePath);
 
   return { absolutePath: realPath, relativePath: realRelativePath };
 }
 
+/**
+ * 디렉터리를 재귀 탐색하여 가시 파일 목록을 수집함
+ */
 async function collectFiles(
   directory: string,
   realWorkspaceRoot: string,
@@ -88,30 +109,33 @@ async function collectFiles(
   return files;
 }
 
-// Tool definitions
+// HTTP 게이트웨이 노출 도구 목록 정의
 const TOOLS = [
   {
     name: 'workspace_status',
-    description: 'Return basic information about the configured workspace root.',
+    description: '설정된 워크스페이스 루트의 기본 정보를 반환함 (읽기 전용임)',
     parameters: {},
   },
   {
     name: 'list_project_files',
-    description: 'List visible files under a workspace-relative directory.',
+    description: '워크스페이스 상대 디렉터리의 가시 파일 목록을 반환함 (읽기 전용임)',
     parameters: {
-      path: { type: 'string', default: '.', description: 'Workspace-relative directory' },
-      maxDepth: { type: 'number', default: 2, description: 'Maximum directory depth' },
+      path: { type: 'string', default: '.', description: '워크스페이스 기준 상대 디렉터리 경로임' },
+      maxDepth: { type: 'number', default: 2, description: '최대 탐색 깊이임' },
     },
   },
   {
     name: 'read_project_file',
-    description: 'Read a visible UTF-8 text file using a workspace-relative path (max 256KB).',
+    description: '워크스페이스 상대경로의 텍스트 파일 내용을 읽음 (최대 256KB 제한함)',
     parameters: {
-      path: { type: 'string', required: true, description: 'Workspace-relative file path' },
+      path: { type: 'string', required: true, description: '워크스페이스 기준 상대 파일 경로임' },
     },
   },
 ];
 
+/**
+ * 도구 호출 요청을 처리하고 결과를 반환함
+ */
 async function handleToolCall(name: string, args: Record<string, any>): Promise<any> {
   if (name === 'workspace_status') {
     const entries = await fs.readdir(workspaceRoot, { withFileTypes: true });
@@ -134,7 +158,7 @@ async function handleToolCall(name: string, args: Record<string, any>): Promise<
     const realRoot = await fs.realpath(workspaceRoot);
     const stats = await fs.stat(directory);
     if (!stats.isDirectory()) {
-      throw new Error('Path is not a directory');
+      throw new Error('요청한 경로가 디렉터리가 아님');
     }
     const files = await collectFiles(directory, realRoot, depth);
     return { count: files.length, files };
@@ -142,12 +166,12 @@ async function handleToolCall(name: string, args: Record<string, any>): Promise<
 
   if (name === 'read_project_file') {
     const relPath = args.path;
-    if (!relPath) throw new Error('Path parameter is required');
+    if (!relPath) throw new Error('path 매개변수가 필수임');
     const { absolutePath: filePath, relativePath: visiblePath } = await resolveAccessiblePath(relPath);
     const stats = await fs.stat(filePath);
-    if (!stats.isFile()) throw new Error('Path is not a file');
+    if (!stats.isFile()) throw new Error('요청한 경로가 일반 파일이 아님');
     const contents = await fs.readFile(filePath);
-    if (contents.includes(0)) throw new Error('Binary files are not supported');
+    if (contents.includes(0)) throw new Error('바이너리 파일은 읽을 수 없음');
     const text = contents.subarray(0, maxReadBytes).toString('utf8');
     return {
       file: visiblePath,
@@ -157,11 +181,11 @@ async function handleToolCall(name: string, args: Record<string, any>): Promise<
     };
   }
 
-  throw new Error(`Unknown tool: ${name}`);
+  throw new Error(`알 수 없는 도구명임: ${name}`);
 }
 
 const server = http.createServer(async (req, res) => {
-  // CORS Headers
+  // CORS 헤더 설정
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Requested-With');
@@ -202,7 +226,7 @@ const server = http.createServer(async (req, res) => {
         const toolArgs = payload.arguments || payload.args || {};
         if (!toolName) {
           res.writeHead(400, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ error: 'Missing "tool" or "name" in JSON body' }));
+          res.end(JSON.stringify({ error: '요청 본문에 tool 또는 name 항목이 누락됨' }));
           return;
         }
 
@@ -222,5 +246,5 @@ const server = http.createServer(async (req, res) => {
 });
 
 server.listen(PORT, '0.0.0.0', () => {
-  console.log(`[mcp-platform] HTTP Gateway listening on http://0.0.0.0:${PORT}`);
+  console.log(`[mcp-platform] HTTP 게이트웨이가 http://0.0.0.0:${PORT} 에서 대기 중임`);
 });

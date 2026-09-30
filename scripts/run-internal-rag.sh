@@ -1,14 +1,12 @@
 #!/usr/bin/env bash
 # =============================================================================
-# 파일명: run-mcp-gateway.sh
-# 경로: scripts/run-mcp-gateway.sh
-# 목적: mcp-platform 전체 통합 stdio 게이트웨이를 기동함
+# 파일명: run-internal-rag.sh
+# 경로: scripts/run-internal-rag.sh
+# 목적: 사내 RAG-vLLM FastMCP 서버를 단독 stdio 모드로 기동함
 # 작성자: AI전략팀
 # 작성일: 2026-09-30
 # 수정일: 2026-09-30
 # =============================================================================
 
 set -euo pipefail
-
-script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
-exec node "$script_dir/../dist/servers/mcp-gateway.js" "$@"
+exec "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/run-data-go-server.sh" internal-rag "$@"

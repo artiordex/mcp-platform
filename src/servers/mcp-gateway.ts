@@ -1,3 +1,12 @@
+/**
+ * 파일명: mcp-gateway.ts
+ * 경로: src/servers/mcp-gateway.ts
+ * 목적: 설정 파일에 정의된 복수 MCP 서버(stdio/HTTP)를 단일 MCP 게이트웨이로 통합 제공함
+ * 작성자: AI전략팀
+ * 작성일: 2026-09-30
+ * 수정일: 2026-09-30
+ */
+
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -53,7 +62,7 @@ const StreamableHttpServerDefinitionSchema = z.object({
         url.search.length === 0 &&
         url.hash.length === 0
       );
-    }, 'Use an HTTP(S) URL without embedded credentials, query parameters, or fragments.'),
+    }, '자격증명, 쿼리, 프래그먼트가 없는 안전한 HTTP(S) URL이어야 함'),
   headersFromEnv: z
     .record(
       z.string().regex(/^[A-Za-z0-9!#$%&'*+.^_`|~-]+$/),
@@ -75,11 +84,17 @@ const GatewayConfigSchema = z.object({
 type ServerDefinition = z.infer<typeof ServerDefinitionSchema>;
 type GatewayConfig = z.infer<typeof GatewayConfigSchema>;
 
+/**
+ * 게이트웨이 설정 파일 경로를 계산함
+ */
 function configPath(): string {
   const configuredPath = process.env.MCP_SERVERS_CONFIG ?? 'config/mcp-servers.json';
   return path.resolve(projectRoot, configuredPath);
 }
 
+/**
+ * mcp-servers.json 설정을 읽고 유효성을 검증함
+ */
 async function loadGatewayConfig(): Promise<GatewayConfig> {
   const filename = configPath();
   let contents: string;
@@ -87,8 +102,7 @@ async function loadGatewayConfig(): Promise<GatewayConfig> {
     contents = await fs.readFile(filename, 'utf8');
   } catch (error) {
     throw new Error(
-      `Could not read MCP server config at ${filename}. Copy ` +
-        'config/mcp-servers.example.json to config/mcp-servers.json, then edit it.',
+      `설정 파일(${filename})을 읽을 수 없음. config/mcp-servers.example.json 파일을 복사하여 준비해야 함`,
       { cause: error },
     );
   }
@@ -97,20 +111,20 @@ async function loadGatewayConfig(): Promise<GatewayConfig> {
   try {
     parsedJson = JSON.parse(contents) as unknown;
   } catch (error) {
-    throw new Error(`MCP server config is not valid JSON: ${describeError(error)}`, {
+    throw new Error(`MCP 서버 설정 파일이 올바른 JSON 형식이 아님: ${describeError(error)}`, {
       cause: error,
     });
   }
 
   const config = GatewayConfigSchema.safeParse(parsedJson);
   if (!config.success) {
-    throw new Error(`MCP server config is invalid: ${config.error.message}`);
+    throw new Error(`MCP 서버 설정 유효성 검증 실패함: ${config.error.message}`);
   }
 
   const seenIds = new Set<string>();
   for (const server of config.data.servers) {
     if (seenIds.has(server.id)) {
-      throw new Error(`MCP server config contains duplicate id: ${server.id}`);
+      throw new Error(`중복된 서버 식별자가 존재함: ${server.id}`);
     }
     seenIds.add(server.id);
   }
@@ -118,6 +132,9 @@ async function loadGatewayConfig(): Promise<GatewayConfig> {
   return config.data;
 }
 
+/**
+ * 개별 서버 정의를 자식 클라이언트 실행 설정으로 변환함
+ */
 function childConfig(server: ServerDefinition): ChildMcpServerConfig {
   if (server.transport === 'streamable-http') {
     return {
@@ -144,11 +161,14 @@ type PreparedTool = {
   inputSchema: ReturnType<typeof fromJsonSchema>;
 };
 
+/**
+ * 하위 도구들을 네임스페이스 규칙에 맞게 래핑 준비함
+ */
 function prepareTools(serverId: string, tools: ChildTool[]): PreparedTool[] {
   const localNames = new Set<string>();
   return tools.map((tool) => {
     if (localNames.has(tool.name)) {
-      throw new Error(`Child server ${serverId} returned duplicate tool name: ${tool.name}`);
+      throw new Error(`하위 서버(${serverId})에서 중복된 도구명을 반환함: ${tool.name}`);
     }
     localNames.add(tool.name);
 
@@ -166,6 +186,9 @@ function prepareTools(serverId: string, tools: ChildTool[]): PreparedTool[] {
   });
 }
 
+/**
+ * 모든 자식 MCP 서버를 병렬 초기화하고 통합 게이트웨이 인스턴스를 구축함
+ */
 async function createGateway(clients: ChildMcpClient[]): Promise<McpServer> {
   const config = await loadGatewayConfig();
   const gateway = new McpServer({ name: config.name, version: '0.1.0' });
@@ -192,7 +215,7 @@ async function createGateway(clients: ChildMcpClient[]): Promise<McpServer> {
 
       for (const { exposedName } of preparedTools) {
         if (registeredNames.has(exposedName)) {
-          throw new Error(`Tool name collision after normalization: ${exposedName}`);
+          throw new Error(`정규화 후 도구명 충돌 발생함: ${exposedName}`);
         }
       }
       for (const { exposedName } of preparedTools) {
@@ -212,12 +235,12 @@ async function createGateway(clients: ChildMcpClient[]): Promise<McpServer> {
 
       clients.push(client);
       process.stderr.write(
-        `[mcp-gateway] ${definition.id}: registered ${tools.length} tools\n`,
+        `[mcp-gateway] ${definition.id}: 도구 ${tools.length}개 등록 완료함\n`,
       );
     } catch (error) {
       await client.close();
       process.stderr.write(
-        `[mcp-gateway] ${definition.id}: skipped (${describeError(error)})\n`,
+        `[mcp-gateway] ${definition.id}: 연결 건너뜀 (${describeError(error)})\n`,
       );
     }
   }

@@ -2,6 +2,14 @@
   "name": "mcp-platform",
   "servers": [
     {
+      "id": "internal_rag",
+      "label": "Internal RAG-vLLM Knowledge Hub",
+      "transport": "stdio",
+      "command": "/bin/bash",
+      "args": ["scripts/run-internal-rag.sh"],
+      "envPassthrough": ["RAG_VLLM_URL", "RAG_API_KEY"]
+    },
+    {
       "id": "playwright",
       "label": "Playwright browser automation",
       "transport": "stdio",
@@ -27,6 +35,14 @@
       "requestTimeoutMs": 60000
     },
     {
+      "id": "data_go_pps",
+      "label": "PPS Narajangteo",
+      "transport": "stdio",
+      "command": "/bin/bash",
+      "args": ["scripts/run-data-go-pps.sh"],
+      "envPassthrough": ["DATA_GO_API_KEY", "API_KEY"]
+    },
+    {
       "id": "data_go_nps",
       "label": "NPS business enrollment",
       "transport": "stdio",
@@ -40,14 +56,6 @@
       "transport": "stdio",
       "command": "/bin/bash",
       "args": ["scripts/run-data-go-nts.sh"],
-      "envPassthrough": ["DATA_GO_API_KEY", "API_KEY"]
-    },
-    {
-      "id": "data_go_pps",
-      "label": "PPS Narajangteo",
-      "transport": "stdio",
-      "command": "/bin/bash",
-      "args": ["scripts/run-data-go-pps.sh"],
       "envPassthrough": ["DATA_GO_API_KEY", "API_KEY"]
     },
     {

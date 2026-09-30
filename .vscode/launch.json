@@ -1,0 +1,21 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "Go: MCP server (stdio)",
+      "type": "go",
+      "request": "launch",
+      "mode": "debug",
+      "program": "${workspaceFolder}/cmd/mcp-go-server",
+      "cwd": "${workspaceFolder}"
+    },
+    {
+      "name": "Go: MCP client demo",
+      "type": "go",
+      "request": "launch",
+      "mode": "debug",
+      "program": "${workspaceFolder}/cmd/mcp-go-client",
+      "cwd": "${workspaceFolder}"
+    }
+  ]
+}

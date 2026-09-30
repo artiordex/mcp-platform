@@ -1,0 +1,25 @@
+{
+  "mcpServers": {
+    "mcp-platform": {
+      "command": "/bin/bash",
+      "args": [
+        "/home/kreverse/projects/mcp-platform/scripts/run-mcp-gateway.sh"
+      ]
+    },
+    "workspace-tools": {
+      "command": "node",
+      "args": [
+        "/home/kreverse/projects/mcp-platform/dist/servers/workspace-tools.js"
+      ],
+      "env": {
+        "MCP_WORKSPACE_ROOT": "/home/kreverse/projects"
+      }
+    },
+    "data-go-portal": {
+      "command": "/bin/bash",
+      "args": [
+        "/home/kreverse/projects/mcp-platform/scripts/run-data-go-portal.sh"
+      ]
+    }
+  }
+}

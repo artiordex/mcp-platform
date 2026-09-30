@@ -1,3 +1,12 @@
+/**
+ * 파일명: data-go-gateway.ts
+ * 경로: src/servers/data-go-gateway.ts
+ * 목적: 공공데이터(NPS, NTS, PPS 나라장터 등) 및 사내 RAG-vLLM을 단일 MCP 프로세스로 통합 제공함
+ * 작성자: AI전략팀
+ * 작성일: 2026-09-30
+ * 수정일: 2026-09-30
+ */
+
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
 
@@ -21,6 +30,8 @@ type DataGoServerDefinition = {
 const publicDataEnvironment = [
   'DATA_GO_API_KEY',
   'API_KEY',
+  'RAG_VLLM_URL',
+  'RAG_API_KEY',
   'HTTP_PROXY',
   'HTTPS_PROXY',
   'NO_PROXY',
@@ -43,7 +54,11 @@ const projectRoot = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)),
   '../..',
 );
+
+// 기본 활성화 서버 목록 (사내 RAG, 나라장터, 국민연금, 금융위, 카탈로그, 식품안전나라)
 const defaultServerIds = new Set([
+  'rag',
+  'pps',
   'nps',
   'fsc',
   'public_data_catalog',
@@ -51,6 +66,18 @@ const defaultServerIds = new Set([
 ]);
 
 const serverDefinitions: DataGoServerDefinition[] = [
+  {
+    id: 'rag',
+    label: 'Internal RAG-vLLM Knowledge Hub',
+    launcher: 'run-internal-rag.sh',
+    envPassthrough: publicDataEnvironment,
+  },
+  {
+    id: 'pps',
+    label: 'PPS Narajangteo',
+    launcher: 'run-data-go-pps.sh',
+    envPassthrough: publicDataEnvironment,
+  },
   {
     id: 'nps',
     label: 'NPS Business Enrollment',
@@ -61,12 +88,6 @@ const serverDefinitions: DataGoServerDefinition[] = [
     id: 'nts',
     label: 'NTS Business Verification',
     launcher: 'run-data-go-nts.sh',
-    envPassthrough: publicDataEnvironment,
-  },
-  {
-    id: 'pps',
-    label: 'PPS Narajangteo',
-    launcher: 'run-data-go-pps.sh',
     envPassthrough: publicDataEnvironment,
   },
   {
@@ -93,6 +114,9 @@ function makeToolName(serverId: string, toolName: string): string {
   return namespacedToolName('data_go', serverId, toolName);
 }
 
+/**
+ * 환경변수(DATA_GO_SERVERS) 또는 기본 설정에 따라 활성화할 서버 목록을 선별함
+ */
 function enabledDefinitions(): DataGoServerDefinition[] {
   const requested = process.env.DATA_GO_SERVERS?.split(',')
     .map((value) => value.trim())
@@ -106,13 +130,16 @@ function enabledDefinitions(): DataGoServerDefinition[] {
   return requested.flatMap((id) => {
     const definition = byId.get(id);
     if (!definition) {
-      process.stderr.write(`[data-go] Unknown server in DATA_GO_SERVERS: ${id}\n`);
+      process.stderr.write(`[data-go] DATA_GO_SERVERS에 알 수 없는 서버 식별자임: ${id}\n`);
       return [];
     }
     return [definition];
   });
 }
 
+/**
+ * 복수의 공공데이터/RAG 서버를 단일 게이트웨이로 취합하여 초기화함
+ */
 async function createGateway(clients: ChildMcpClient[]): Promise<McpServer> {
   const gateway = new McpServer({
     name: 'data-go-mcp-gateway',
@@ -128,11 +155,9 @@ async function createGateway(clients: ChildMcpClient[]): Promise<McpServer> {
   const registeredNames = new Set<string>();
 
   for (const definition of enabledDefinitions()) {
-    const launcherPath = path.join(projectRoot, 'scripts', definition.launcher);
     const client = new ChildMcpClient(definition.id, definition.label, {
-      transport: 'stdio',
       command: '/bin/bash',
-      args: [launcherPath],
+      args: [`scripts/${definition.launcher}`],
       cwd: projectRoot,
       envPassthrough: definition.envPassthrough,
     });
@@ -141,45 +166,37 @@ async function createGateway(clients: ChildMcpClient[]): Promise<McpServer> {
       await client.initialize();
       const tools = await client.listTools();
 
-      const preparedTools = tools.map((tool) => ({
-        source: tool,
-        exposedName: makeToolName(definition.id, tool.name),
-        inputSchema: fromJsonSchema(
-          (tool.inputSchema ?? {
-            type: 'object',
-            properties: {},
-            additionalProperties: false,
-          }) as Parameters<typeof fromJsonSchema>[0],
-        ),
-      }));
-      const localNames = new Set<string>();
-      for (const { exposedName } of preparedTools) {
-        if (registeredNames.has(exposedName) || localNames.has(exposedName)) {
-          throw new Error(`Tool name collision after normalization: ${exposedName}`);
+      for (const tool of tools) {
+        const exposedName = makeToolName(definition.id, tool.name);
+        if (registeredNames.has(exposedName)) {
+          throw new Error(`도구명 충돌 발생함: ${exposedName}`);
         }
-        localNames.add(exposedName);
-      }
+        registeredNames.add(exposedName);
 
-      for (const { source, exposedName, inputSchema } of preparedTools) {
         gateway.registerTool(
           exposedName,
           {
-            description: `[${definition.label}] ${source.description ?? source.name}`,
-            inputSchema,
+            description: `[${definition.label}] ${tool.description ?? tool.name}`,
+            inputSchema: fromJsonSchema(
+              (tool.inputSchema ?? {
+                type: 'object',
+                properties: {},
+                additionalProperties: false,
+              }) as Parameters<typeof fromJsonSchema>[0],
+            ),
           },
-          async (args) => client.callTool(source.name, args),
+          async (args) => client.callTool(tool.name, args),
         );
-        registeredNames.add(exposedName);
       }
 
       clients.push(client);
       process.stderr.write(
-        `[data-go] ${definition.id}: registered ${tools.length} tools\n`,
+        `[data-go] ${definition.id}: 도구 ${tools.length}개 등록 완료함\n`,
       );
     } catch (error) {
       await client.close();
       process.stderr.write(
-        `[data-go] ${definition.id}: skipped (${describeError(error)})\n`,
+        `[data-go] ${definition.id}: 연결 건너뜀 (${describeError(error)})\n`,
       );
     }
   }
@@ -197,8 +214,9 @@ const gatewayStarted = new Promise<void>((resolve) => {
 });
 
 async function closeChildren(): Promise<void> {
-  await Promise.allSettled(activeClients.map((client) => client.close()));
+  const clients = activeClients;
   activeClients = [];
+  await Promise.allSettled(clients.map((client) => client.close()));
 }
 
 const shutdown = async (): Promise<void> => {
@@ -220,7 +238,7 @@ process.once('SIGINT', () => void shutdown());
 process.once('SIGTERM', () => void shutdown());
 process.stdin.once('end', () => void shutdownAfterInputEnd());
 process.stdin.once('close', () => void shutdownAfterInputEnd());
-process.once('exit', () => closeChildren());
+process.once('exit', () => void closeChildren());
 
 handle = serveStdio(async () => {
   await closeChildren();
@@ -229,4 +247,4 @@ handle = serveStdio(async () => {
   return gatewayReady;
 });
 
-console.error('data-go-mcp-gateway MCP server running on stdio');
+console.error('Data.go.kr MCP gateway running on stdio');

@@ -3,7 +3,7 @@ set -euo pipefail
 
 script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 mcp_root="$(cd -- "$script_dir/.." && pwd)"
-python_root="$mcp_root/python/mcp-runtime"
+connector_root="$mcp_root/connectors"
 server_name="${1:-}"
 
 case "$server_name" in
@@ -25,6 +25,9 @@ case "$server_name" in
   food-safety-korea)
     python_module="mcp_platform.servers.food_safety"
     ;;
+  internal-rag)
+    python_module="mcp_platform.servers.rag"
+    ;;
   *)
     cat >&2 <<'USAGE'
 Usage: run-data-go-server.sh <server>
@@ -41,14 +44,12 @@ USAGE
     ;;
 esac
 
-project_dir="$python_root"
-
-if [[ ! -f "$project_dir/pyproject.toml" ]]; then
-  echo "Unknown or missing Python MCP runtime: $project_dir" >&2
+if [[ ! -f "$connector_root/pyproject.toml" ]]; then
+  echo "Unknown or missing MCP connector project: $connector_root" >&2
   exit 1
 fi
 
-python_executable="$project_dir/.venv/bin/python"
+python_executable="$mcp_root/.venv/bin/python"
 if [[ ! -x "$python_executable" ]]; then
   echo "The local Python environment is missing. Run $mcp_root/scripts/setup-mcp-runtime.sh first." >&2
   exit 1
@@ -56,7 +57,7 @@ fi
 
 # Keep local source imports working even when an editable environment contains
 # an old absolute project path after a repository rename.
-export PYTHONPATH="$project_dir${PYTHONPATH:+:$PYTHONPATH}"
+export PYTHONPATH="$connector_root${PYTHONPATH:+:$PYTHONPATH}"
 
 # Load the repository-level .env while preserving explicit parent values.
 data_go_api_key_override="${DATA_GO_API_KEY:-}"
@@ -84,7 +85,7 @@ fi
 
 
 # Each selected server remains a separate process, while all local modules
-# share one maintained runtime project and virtual environment. Runtime
+# share one maintained connector project and root virtual environment. Runtime
 # startup uses the prepared interpreter directly so it does not need uv's
 # cache or lock files in the MCP host's home directory.
 exec "$python_executable" "$mcp_root/scripts/run-data-go-python.py" "$python_module"

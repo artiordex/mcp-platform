@@ -350,7 +350,7 @@ wheels = [
 ]
 
 [[package]]
-name = "mcp-platform-python"
+name = "mcp-platform-connectors"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [

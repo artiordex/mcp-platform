@@ -3,7 +3,7 @@
 ## data-go-mcp-servers reference
 
 The local Data.go.kr MCP implementation was rewritten under
-`python/mcp-runtime/mcp_platform/servers/`. The repository does not execute or ship the
+`connectors/mcp_platform/servers/`. The repository does not execute or ship the
 upstream source tree; the upstream project was used as a functional/API
 reference during the rewrite.
 
@@ -20,3 +20,13 @@ from the software license.
 
 The upstream project is not an official project of the Korean government or
 data.go.kr.
+
+## Go MCP SDK and architecture reference
+
+The Go starter depends on `github.com/modelcontextprotocol/go-sdk` v1.7.0 for
+MCP protocol support. Its license is available in the
+[official SDK repository](https://github.com/modelcontextprotocol/go-sdk).
+
+The `cmd/` and internal package layout was informed by
+[GitHub's MCP server](https://github.com/github/github-mcp-server). No source
+code from that server is included in this repository.
