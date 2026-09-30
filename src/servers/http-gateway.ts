@@ -448,13 +448,74 @@ httpMcpServer.registerTool(
 // MCP 서버와 HTTP 트랜스포트 바인딩 완료
 await httpMcpServer.connect(httpTransport);
 
+// 3. 메트릭 및 레이트 리미터 정의
+interface GatewayMetrics {
+  totalRequests: number;
+  statusCodes: Record<string, number>;
+  endpoints: Record<string, number>;
+  totalLatencyMs: number;
+  maxLatencyMs: number;
+  startedAt: string;
+}
+
+const metrics: GatewayMetrics = {
+  totalRequests: 0,
+  statusCodes: {},
+  endpoints: {},
+  totalLatencyMs: 0,
+  maxLatencyMs: 0,
+  startedAt: new Date().toISOString(),
+};
+
+// IP별 요청 타임스탬프 슬라이딩 윈도우
+const rateLimitMap = new Map<string, number[]>();
+const RATE_LIMIT_PER_SEC = Number(process.env.MCP_HTTP_RATE_LIMIT ?? 120);
+
+function checkRateLimit(clientIp: string): boolean {
+  const now = Date.now();
+  const windowStart = now - 1000;
+  let timestamps = rateLimitMap.get(clientIp);
+  if (!timestamps) {
+    timestamps = [];
+    rateLimitMap.set(clientIp, timestamps);
+  }
+  const filtered = timestamps.filter((t) => t > windowStart);
+  if (filtered.length >= RATE_LIMIT_PER_SEC) {
+    rateLimitMap.set(clientIp, filtered);
+    return false;
+  }
+  filtered.push(now);
+  rateLimitMap.set(clientIp, filtered);
+  return true;
+}
+
 // 4. HTTP 요청 디스패처 및 보안 미들웨어
 const server = http.createServer(async (req, res) => {
+  const startTime = Date.now();
+  const requestId = (req.headers['x-request-id'] as string) || randomUUID();
+  res.setHeader('X-Request-Id', requestId);
+
   req.setTimeout(REQUEST_TIMEOUT_MS, () => {
     if (!res.headersSent) {
       res.writeHead(408, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ error: '요청 처리 시간 초과됨 (30초 제한)' }));
     }
+  });
+
+  const url = new URL(req.url ?? '/', `http://${req.headers.host ?? 'localhost'}`);
+  const pathname = url.pathname;
+
+  // 응답 완료 시 메트릭 집계
+  res.on('finish', () => {
+    const duration = Date.now() - startTime;
+    metrics.totalRequests++;
+    metrics.totalLatencyMs += duration;
+    if (duration > metrics.maxLatencyMs) {
+      metrics.maxLatencyMs = duration;
+    }
+    const statusGroup = `${Math.floor(res.statusCode / 100)}xx`;
+    metrics.statusCodes[statusGroup] = (metrics.statusCodes[statusGroup] ?? 0) + 1;
+    metrics.endpoints[pathname] = (metrics.endpoints[pathname] ?? 0) + 1;
   });
 
   // Host 헤더 유효성 검증
@@ -478,6 +539,17 @@ const server = http.createServer(async (req, res) => {
     res.setHeader('Vary', 'Origin');
   }
 
+  // 레이트 리미트 검증
+  const clientIp = req.socket.remoteAddress ?? '127.0.0.1';
+  if (!checkRateLimit(clientIp)) {
+    res.writeHead(429, {
+      'Content-Type': 'application/json',
+      'Retry-After': '1',
+    });
+    res.end(JSON.stringify({ error: '요청 한도 초과됨 (초당 최대 요청 제한)', retryAfter: 1 }));
+    return;
+  }
+
   res.setHeader('Access-Control-Allow-Methods', 'GET, POST, DELETE, OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, Accept, X-Requested-With');
 
@@ -486,9 +558,6 @@ const server = http.createServer(async (req, res) => {
     res.end();
     return;
   }
-
-  const url = new URL(req.url ?? '/', `http://${req.headers.host ?? 'localhost'}`);
-  const pathname = url.pathname;
 
   // Bearer 토큰 검증 헬퍼 함수
   const isAuthenticated = (): boolean => {
@@ -590,6 +659,52 @@ const server = http.createServer(async (req, res) => {
         uptime: process.uptime(),
         workspace_tools_enabled: enableWorkspaceHttp,
       }),
+    );
+    return;
+  }
+
+  // 시스템 및 HTTP 통계 메트릭 엔드포인트 (JSON 및 Prometheus 텍스트 포맷 지원)
+  if (req.method === 'GET' && (pathname === '/api/metrics' || pathname === '/metrics')) {
+    const accept = req.headers.accept ?? '';
+    const format = url.searchParams.get('format');
+    if (format === 'prometheus' || accept.includes('text/plain')) {
+      const avgLatency = metrics.totalRequests > 0 ? (metrics.totalLatencyMs / metrics.totalRequests).toFixed(2) : '0';
+      let prom = `# HELP mcp_http_requests_total 총 HTTP 요청 처리 건수임\n`;
+      prom += `# TYPE mcp_http_requests_total counter\n`;
+      prom += `mcp_http_requests_total ${metrics.totalRequests}\n\n`;
+      prom += `# HELP mcp_http_request_duration_ms_avg 평균 요청 처리 지연시간(ms)임\n`;
+      prom += `# TYPE mcp_http_request_duration_ms_avg gauge\n`;
+      prom += `mcp_http_request_duration_ms_avg ${avgLatency}\n\n`;
+      prom += `# HELP mcp_http_request_duration_ms_max 최대 요청 처리 지연시간(ms)임\n`;
+      prom += `# TYPE mcp_http_request_duration_ms_max gauge\n`;
+      prom += `mcp_http_request_duration_ms_max ${metrics.maxLatencyMs}\n\n`;
+      for (const [code, count] of Object.entries(metrics.statusCodes)) {
+        prom += `mcp_http_responses_total{status_group="${code}"} ${count}\n`;
+      }
+      res.writeHead(200, { 'Content-Type': 'text/plain; version=0.0.4; charset=utf-8' });
+      res.end(prom);
+      return;
+    }
+
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(
+      JSON.stringify(
+        {
+          service: 'mcp-platform',
+          totalRequests: metrics.totalRequests,
+          statusCodes: metrics.statusCodes,
+          endpoints: metrics.endpoints,
+          avgLatencyMs:
+            metrics.totalRequests > 0
+              ? Number((metrics.totalLatencyMs / metrics.totalRequests).toFixed(2))
+              : 0,
+          maxLatencyMs: metrics.maxLatencyMs,
+          startedAt: metrics.startedAt,
+          uptimeSeconds: process.uptime(),
+        },
+        null,
+        2,
+      ),
     );
     return;
   }

@@ -104,6 +104,13 @@ test('HTTP gateway exposes /health, /tools, /servers, and /cache/stats', async (
     assert.equal(cacheRes.status, 200);
     assert.equal(cacheRes.body.success, true);
     assert.equal(cacheRes.body.stats.status, 'active');
+
+    // 4. /api/metrics 엔드포인트 및 X-Request-Id 상관 ID 헤더 검증
+    const metricsRes = await fetchJson(`http://127.0.0.1:${TEST_PORT}/api/metrics`);
+    assert.equal(metricsRes.status, 200);
+    assert.equal(metricsRes.body.service, 'mcp-platform');
+    assert.ok(typeof metricsRes.body.totalRequests === 'number');
+    assert.ok(metricsRes.headers['x-request-id'] !== undefined, 'X-Request-Id 헤더가 존재해야 함');
   } finally {
     child.kill('SIGTERM');
   }

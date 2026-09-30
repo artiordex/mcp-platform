@@ -97,3 +97,54 @@ func TestRunBenchmark(t *testing.T) {
 		t.Errorf("가속비가 비정상적으로 낮음: %f", bench.SpeedupFactor)
 	}
 }
+
+func TestTokenBucketLimiter(t *testing.T) {
+	ctx := context.Background()
+	limiter := NewTokenBucketLimiter(100, 5)
+
+	// 초기 용량(5개) 내 즉각 획득 검증
+	for i := 0; i < 5; i++ {
+		if err := limiter.Wait(ctx); err != nil {
+			t.Fatalf("토큰 대기 실패: %v", err)
+		}
+	}
+
+	// 취소된 컨텍스트 대기 시 에러 반환 검증
+	cancelCtx, cancel := context.WithCancel(ctx)
+	cancel()
+	if err := limiter.Wait(cancelCtx); err == nil {
+		t.Fatal("취소된 컨텍스트에서 에러가 발생해야 함")
+	}
+}
+
+func TestWithRetry(t *testing.T) {
+	ctx := context.Background()
+	attempts := 0
+
+	task := func(ctx context.Context, item int) (int, error) {
+		attempts++
+		if attempts < 3 {
+			return 0, context.DeadlineExceeded
+		}
+		return item * 2, nil
+	}
+
+	cfg := RetryConfig{
+		MaxRetries:     3,
+		InitialBackoff: 1 * time.Millisecond,
+		MaxBackoff:     10 * time.Millisecond,
+		Multiplier:     2.0,
+	}
+
+	retryingTask := WithRetry(cfg, task)
+	val, err := retryingTask(ctx, 5)
+	if err != nil {
+		t.Fatalf("재시도 후 성공해야 함: %v", err)
+	}
+	if val != 10 {
+		t.Errorf("기대값 10, 실제값 %d", val)
+	}
+	if attempts != 3 {
+		t.Errorf("시도 횟수 기대값 3, 실제값 %d", attempts)
+	}
+}

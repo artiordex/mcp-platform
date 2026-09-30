@@ -131,61 +131,24 @@ function redactSecrets(text: string, secrets: string[]): string {
  * 하위 MCP 서버 프로세스를 관리하고 통신하는 재사용 클라이언트 클래스임
  */
 export class ChildMcpClient {
-  private readonly client: Client;
-  private readonly transport: Transport;
+  private client!: Client;
+  private transport!: Transport;
   private readonly requestTimeoutMs: number;
   private readonly secrets: string[] = [];
   private closed = false;
   private closing: Promise<void> | undefined;
   private _status: ChildClientStatus = 'uninitialized';
   private _lastError: string | undefined;
+  private _reconnectAttempts = 0;
+  private _lastConnectedAt: Date | undefined;
 
   constructor(
     private readonly serverId: string,
     private readonly label: string,
-    config: ChildMcpServerConfig,
+    private readonly config: ChildMcpServerConfig,
   ) {
     this.requestTimeoutMs = config.requestTimeoutMs ?? 30_000;
-    this.client = new Client({ name: 'mcp-platform-gateway', version: '0.1.0' });
-    if (config.transport === 'streamable-http') {
-      const headers: Record<string, string> = {};
-      for (const [headerName, environmentName] of Object.entries(
-        config.headersFromEnv ?? {},
-      )) {
-        const value = process.env[environmentName];
-        if (value !== undefined) {
-          headers[headerName] = value;
-          this.secrets.push(value);
-        }
-      }
-      const url = new URL(config.url);
-      this.transport = new StreamableHTTPClientTransport(url, {
-        requestInit: { headers },
-      });
-    } else {
-      const env = selectedEnvironment(config.envPassthrough ?? []);
-      this.secrets.push(...Object.values(env));
-      const stdioTransport = new StdioClientTransport({
-        command: config.command,
-        args: config.args,
-        cwd: config.cwd,
-        env,
-        maxBufferSize: config.maxBufferSize,
-        stderr: 'pipe',
-      });
-      this.transport = stdioTransport;
-      const stderr = stdioTransport.stderr;
-      if (stderr) {
-        this.pipeChildStderr(stderr);
-      }
-    }
-
-    this.transport.onerror = (error) => {
-      this._lastError = error.message;
-      process.stderr.write(
-        `[mcp-platform:${this.serverId}] ${redactSecrets(error.message, this.secrets)}\n`,
-      );
-    };
+    this.setupTransport();
   }
 
   get id(): string {
@@ -204,6 +167,68 @@ export class ChildMcpClient {
     return this._lastError;
   }
 
+  get reconnectAttempts(): number {
+    return this._reconnectAttempts;
+  }
+
+  get lastConnectedAt(): Date | undefined {
+    return this._lastConnectedAt;
+  }
+
+  /**
+   * 설정에 맞는 MCP 클라이언트 및 트랜스포트를 초기화함
+   */
+  private setupTransport(): void {
+    this.client = new Client({ name: 'mcp-platform-gateway', version: '0.1.0' });
+
+    if (this.config.transport === 'streamable-http') {
+      const headers: Record<string, string> = {};
+      for (const [headerName, environmentName] of Object.entries(
+        this.config.headersFromEnv ?? {},
+      )) {
+        const value = process.env[environmentName];
+        if (value !== undefined) {
+          headers[headerName] = value;
+          if (!this.secrets.includes(value)) {
+            this.secrets.push(value);
+          }
+        }
+      }
+      const url = new URL(this.config.url);
+      this.transport = new StreamableHTTPClientTransport(url, {
+        requestInit: { headers },
+      });
+    } else {
+      const env = selectedEnvironment(this.config.envPassthrough ?? []);
+      for (const val of Object.values(env)) {
+        if (!this.secrets.includes(val)) {
+          this.secrets.push(val);
+        }
+      }
+      const stdioTransport = new StdioClientTransport({
+        command: this.config.command,
+        args: this.config.args,
+        cwd: this.config.cwd,
+        env,
+        maxBufferSize: this.config.maxBufferSize,
+        stderr: 'pipe',
+      });
+      this.transport = stdioTransport;
+      const stderr = stdioTransport.stderr;
+      if (stderr) {
+        this.pipeChildStderr(stderr);
+      }
+    }
+
+    this.transport.onerror = (error) => {
+      this._lastError = error.message;
+      this._status = 'error';
+      process.stderr.write(
+        `[mcp-platform:${this.serverId}] ${redactSecrets(error.message, this.secrets)}\n`,
+      );
+    };
+  }
+
   private pipeChildStderr(stderr: Stream): void {
     stderr.on('data', (chunk: Buffer | string) => {
       const message = redactSecrets(String(chunk), this.secrets);
@@ -215,15 +240,51 @@ export class ChildMcpClient {
    * 하위 서버와 MCP 핸드셰이크 프로토콜 연결을 수행함
    */
   async initialize(): Promise<void> {
+    if (this.closed) {
+      throw new Error(`이미 종료된 서버(${this.serverId})는 초기화할 수 없음`);
+    }
+
     try {
       await this.client.connect(this.transport, { timeout: this.requestTimeoutMs });
       this._status = 'ready';
       this._lastError = undefined;
+      this._lastConnectedAt = new Date();
+      this._reconnectAttempts = 0;
     } catch (error) {
       this._status = 'error';
       this._lastError = describeError(error);
       throw error;
     }
+  }
+
+  /**
+   * 연결이 유효하지 않을 때 지수 백오프로 재연결을 시도함
+   */
+  async ensureConnected(maxRetries = 2): Promise<boolean> {
+    if (this.closed) return false;
+    if (this._status === 'ready') return true;
+
+    for (let attempt = 1; attempt <= maxRetries; attempt++) {
+      this._reconnectAttempts++;
+      const backoffMs = Math.min(200 * Math.pow(2, attempt - 1), 2000);
+      await new Promise((resolve) => setTimeout(resolve, backoffMs));
+
+      try {
+        // 기존 연결 정리 후 트랜스포트 재생성
+        try {
+          await this.client.close();
+        } catch {
+          // 닫기 실패는 무시함
+        }
+        this.setupTransport();
+        await this.initialize();
+        return true;
+      } catch (error) {
+        this._lastError = describeError(error);
+      }
+    }
+
+    return false;
   }
 
   /**
@@ -247,22 +308,45 @@ export class ChildMcpClient {
   }
 
   /**
-   * 하위 서버의 특정 도구를 인자와 함께 호출함
+   * 하위 서버의 특정 도구를 인자와 함께 호출함 (장애 시 1회 재연결 및 재시도)
    */
   async callTool(toolName: string, args: unknown): Promise<CallToolResult> {
-    return this.client.callTool(
-      {
-        name: toolName,
-        arguments: isJsonObject(args) ? args : {},
-      },
-      { timeout: this.requestTimeoutMs },
-    );
+    if (this._status !== 'ready') {
+      await this.ensureConnected();
+    }
+
+    try {
+      return await this.client.callTool(
+        {
+          name: toolName,
+          arguments: isJsonObject(args) ? args : {},
+        },
+        { timeout: this.requestTimeoutMs },
+      );
+    } catch (error) {
+      // 연결 오류로 인한 실패 시 1회 재연결 시도 후 재시도함
+      const recovered = await this.ensureConnected(1);
+      if (recovered) {
+        return this.client.callTool(
+          {
+            name: toolName,
+            arguments: isJsonObject(args) ? args : {},
+          },
+          { timeout: this.requestTimeoutMs },
+        );
+      }
+      this._lastError = describeError(error);
+      throw error;
+    }
   }
 
   /**
    * 하위 서버가 제공하는 리소스 목록을 조회함
    */
   async listResources(): Promise<ChildResource[]> {
+    if (this._status !== 'ready') {
+      await this.ensureConnected();
+    }
     if (this._status !== 'ready') {
       return [];
     }
@@ -279,16 +363,32 @@ export class ChildMcpClient {
   }
 
   /**
-   * 하위 서버의 특정 리소스를 URI로 읽음
+   * 하위 서버의 특정 리소스를 URI로 읽음 (장애 시 1회 재연결 및 재시도)
    */
   async readResource(uri: string): Promise<Awaited<ReturnType<Client['readResource']>>> {
-    return this.client.readResource({ uri }, { timeout: this.requestTimeoutMs });
+    if (this._status !== 'ready') {
+      await this.ensureConnected();
+    }
+
+    try {
+      return await this.client.readResource({ uri }, { timeout: this.requestTimeoutMs });
+    } catch (error) {
+      const recovered = await this.ensureConnected(1);
+      if (recovered) {
+        return this.client.readResource({ uri }, { timeout: this.requestTimeoutMs });
+      }
+      this._lastError = describeError(error);
+      throw error;
+    }
   }
 
   /**
    * 하위 서버가 제공하는 프롬프트 목록을 조회함
    */
   async listPrompts(): Promise<ChildPrompt[]> {
+    if (this._status !== 'ready') {
+      await this.ensureConnected();
+    }
     if (this._status !== 'ready') {
       return [];
     }
@@ -305,16 +405,32 @@ export class ChildMcpClient {
   }
 
   /**
-   * 하위 서버의 특정 프롬프트를 인자와 함께 가져옴
+   * 하위 서버의 특정 프롬프트를 인자와 함께 가져옴 (장애 시 1회 재연결 및 재시도)
    */
   async getPrompt(
     name: string,
     args?: Record<string, string>,
   ): Promise<Awaited<ReturnType<Client['getPrompt']>>> {
-    return this.client.getPrompt(
-      { name, arguments: args },
-      { timeout: this.requestTimeoutMs },
-    );
+    if (this._status !== 'ready') {
+      await this.ensureConnected();
+    }
+
+    try {
+      return await this.client.getPrompt(
+        { name, arguments: args },
+        { timeout: this.requestTimeoutMs },
+      );
+    } catch (error) {
+      const recovered = await this.ensureConnected(1);
+      if (recovered) {
+        return this.client.getPrompt(
+          { name, arguments: args },
+          { timeout: this.requestTimeoutMs },
+        );
+      }
+      this._lastError = describeError(error);
+      throw error;
+    }
   }
 
   /**

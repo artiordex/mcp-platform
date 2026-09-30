@@ -84,6 +84,35 @@ def test_tiered_cache_promotion(tmp_path):
     assert l1.get(key) == {"level": 2}
 
 
+def test_sqlite_cache_compression_and_cleanup(tmp_path):
+    """대용량 데이터의 투명 gzip 압축 및 만료 캐시 자동 정리를 검증함"""
+    from mcp_platform.core.cache import SQLiteCache
+
+    db_file = tmp_path / "compress_test.db"
+    cache = SQLiteCache(db_path=db_file, default_ttl_seconds=1)
+
+    # 1KB 초과 대용량 데이터 생성
+    large_payload = {"content": "대용량 텍스트 " * 200, "meta": list(range(100))}
+    cache.set("large_key", large_payload, ttl_seconds=1)
+
+    # 정상 복원 검증
+    restored = cache.get("large_key")
+    assert restored == large_payload
+
+    # 실제 DB에 GZ: 접두사로 압축 저장되었는지 확인
+    with cache._get_connection() as conn:
+        row = conn.execute("SELECT value FROM cache_entries WHERE key = 'large_key'").fetchone()
+        assert row is not None
+        assert row[0].startswith("GZ:")
+
+    # 만료 대기 및 cleanup_expired 검증
+    import time
+    time.sleep(1.1)
+    deleted = cache.cleanup_expired()
+    assert deleted == 1
+    assert cache.count() == 0
+
+
 def test_rag_search_documents_success(monkeypatch):
     """RAG 문서 검색 도구가 정상 응답을 파싱하고 캐시하는지 검증함"""
     class FakeResponse:

@@ -356,24 +356,41 @@ async function createGateway(clients: ChildMcpClient[]): Promise<McpServer> {
       description: '공공데이터 및 RAG 하위 서버들의 상태, 도구/자원 수, 에러 내역을 반환함',
       mimeType: 'application/json',
     },
-    async () => ({
-      contents: [
-        {
-          uri: 'data_go://system/servers',
-          mimeType: 'application/json',
-          text: JSON.stringify(
-            {
-              servers: serverStatuses,
-              totalServers: serverStatuses.length,
-              readyServers: serverStatuses.filter((s) => s.status === 'ready').length,
-              errorServers: serverStatuses.filter((s) => s.status === 'error').length,
-            },
-            null,
-            2,
-          ),
-        },
-      ],
-    }),
+    async () => {
+      const clientMap = new Map(clients.map((c) => [c.id, c]));
+      const liveStatuses = serverStatuses.map((s) => {
+        const liveClient = clientMap.get(s.id);
+        if (liveClient) {
+          return {
+            ...s,
+            status: liveClient.status,
+            reconnectAttempts: liveClient.reconnectAttempts,
+            lastConnectedAt: liveClient.lastConnectedAt?.toISOString(),
+            lastError: liveClient.lastError ?? s.lastError,
+          };
+        }
+        return s;
+      });
+
+      return {
+        contents: [
+          {
+            uri: 'data_go://system/servers',
+            mimeType: 'application/json',
+            text: JSON.stringify(
+              {
+                servers: liveStatuses,
+                totalServers: liveStatuses.length,
+                readyServers: liveStatuses.filter((s) => s.status === 'ready').length,
+                errorServers: liveStatuses.filter((s) => s.status === 'error').length,
+              },
+              null,
+              2,
+            ),
+          },
+        ],
+      };
+    },
   );
 
   return gateway;

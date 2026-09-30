@@ -11,6 +11,8 @@
 
 from __future__ import annotations
 
+import base64
+import gzip
 import hashlib
 import json
 import os
@@ -155,17 +157,25 @@ class SQLiteCache:
                 conn.execute("DELETE FROM cache_entries WHERE key = ?", (key,))
                 return None
             try:
+                if val_text.startswith("GZ:"):
+                    raw_compressed = base64.b64decode(val_text[3:].encode("ascii"))
+                    decompressed = gzip.decompress(raw_compressed).decode("utf-8")
+                    return json.loads(decompressed)
                 return json.loads(val_text)
             except Exception:
                 return None
 
     def set(self, key: str, value: Any, ttl_seconds: int | None = None) -> None:
-        """디스크 캐시에 데이터를 직렬화하여 저장함"""
+        """디스크 캐시에 데이터를 직렬화하여 저장함 (1KB 초과 시 gzip 압축함)"""
         ttl = ttl_seconds if ttl_seconds is not None else self._default_ttl
         now = time.time()
         expire_at = now + max(ttl, 1)
         try:
             val_text = json.dumps(value, ensure_ascii=False)
+            if len(val_text.encode("utf-8")) > 1024:
+                compressed = gzip.compress(val_text.encode("utf-8"))
+                val_text = "GZ:" + base64.b64encode(compressed).decode("ascii")
+
             with self._get_connection() as conn:
                 conn.execute(
                     """
@@ -176,6 +186,14 @@ class SQLiteCache:
                 )
         except Exception:
             pass
+
+    def cleanup_expired(self) -> int:
+        """만료된 디스크 캐시 레코드를 일괄 삭제하고 삭제 건수를 반환함"""
+        now = time.time()
+        with self._get_connection() as conn:
+            cur = conn.cursor()
+            cur.execute("DELETE FROM cache_entries WHERE expire_at <= ?", (now,))
+            return cur.rowcount
 
     def clear(self) -> None:
         """디스크 캐시 데이터를 전량 삭제함"""
@@ -224,6 +242,16 @@ class TieredCache:
         """L1 및 L2 캐시를 모두 초기화함"""
         self._l1.clear()
         self._l2.clear()
+
+    def cleanup_expired(self) -> dict[str, int]:
+        """L1 및 L2 캐시의 만료 항목을 정리하고 결과를 반환함"""
+        self._l1._cleanup_expired()
+        deleted_disk = self._l2.cleanup_expired()
+        return {
+            "l1_remaining": self._l1.size,
+            "l2_deleted": deleted_disk,
+            "l2_remaining": self._l2.count(),
+        }
 
     def stats(self) -> dict[str, Any]:
         """캐시 현황 통계를 반환함"""
