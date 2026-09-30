@@ -89,6 +89,30 @@
       "command": "/bin/bash",
       "args": ["scripts/run-data-go-food-safety.sh"],
       "envPassthrough": ["FOOD_SAFETY_API_KEY", "FOOD_API_KEY"]
+    },
+    {
+      "id": "dart_filings",
+      "label": "OpenDART Corporate Disclosures",
+      "transport": "stdio",
+      "command": "/bin/bash",
+      "args": ["scripts/run-dart-filings.sh"],
+      "envPassthrough": ["DART_API_KEY", "DATA_GO_API_KEY"]
+    },
+    {
+      "id": "address_lookup",
+      "label": "Address and District Standard Lookup",
+      "transport": "stdio",
+      "command": "/bin/bash",
+      "args": ["scripts/run-address-lookup.sh"],
+      "envPassthrough": ["JUSO_API_KEY", "DATA_GO_API_KEY"]
+    },
+    {
+      "id": "smes_programs",
+      "label": "SMES Support Programs and Policy Funds",
+      "transport": "stdio",
+      "command": "/bin/bash",
+      "args": ["scripts/run-smes-programs.sh"],
+      "envPassthrough": ["BIZINFO_API_KEY", "DATA_GO_API_KEY"]
     }
   ]
 }

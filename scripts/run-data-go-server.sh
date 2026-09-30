@@ -37,6 +37,9 @@ case "$server_name" in
   address-lookup)
     python_module="mcp_platform.servers.address"
     ;;
+  smes-programs)
+    python_module="mcp_platform.servers.smes"
+    ;;
   *)
     cat >&2 <<'USAGE'
 Usage: run-data-go-server.sh <server>
@@ -52,6 +55,7 @@ Servers:
   corporate-intelligence
   dart-filings
   address-lookup
+  smes-programs
 USAGE
     exit 2
     ;;

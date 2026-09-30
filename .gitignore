@@ -6,6 +6,7 @@
 # Local MCP server registry (copy the example and add local settings here)
 config/mcp-servers.json
 .playwright-mcp/
+.runtime/
 
 # Python caches and environments
 __pycache__/
