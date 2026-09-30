@@ -47,6 +47,43 @@ def test_ttl_cache_capacity_limit():
     assert len(cache._store) <= 5
 
 
+def test_sqlite_cache_persistence(tmp_path):
+    """SQLite 캐시가 파일에 정상 영속화되고 조회되는지 검증함"""
+    from mcp_platform.core.cache import SQLiteCache
+
+    db_file = tmp_path / "test_cache.db"
+    cache = SQLiteCache(db_path=db_file, default_ttl_seconds=10)
+    key = "test_key_1"
+    cache.set(key, {"msg": "영속 데이터"})
+
+    # 새 인스턴스로 동일 DB 조회 시 데이터 복원 확인
+    cache2 = SQLiteCache(db_path=db_file)
+    assert cache2.get(key) == {"msg": "영속 데이터"}
+    assert cache2.count() == 1
+
+
+def test_tiered_cache_promotion(tmp_path):
+    """L1에 없으나 L2에 있는 데이터가 L1으로 자동 승격 캐시되는지 검증함"""
+    from mcp_platform.core.cache import SQLiteCache, TTLCache, TieredCache
+
+    db_file = tmp_path / "tiered_cache.db"
+    l1 = TTLCache(default_ttl_seconds=60)
+    l2 = SQLiteCache(db_path=db_file, default_ttl_seconds=60)
+    tiered = TieredCache(l1, l2)
+
+    key = "tiered_key"
+    tiered.set(key, {"level": 2})
+
+    # L1만 임의 비움
+    l1.clear()
+    assert l1.get(key) is None
+
+    # TieredCache 조회 시 L2에서 가져오며 L1에 다시 적재됨
+    val = tiered.get(key)
+    assert val == {"level": 2}
+    assert l1.get(key) == {"level": 2}
+
+
 def test_rag_search_documents_success(monkeypatch):
     """RAG 문서 검색 도구가 정상 응답을 파싱하고 캐시하는지 검증함"""
     class FakeResponse:
