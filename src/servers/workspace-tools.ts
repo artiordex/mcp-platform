@@ -241,6 +241,101 @@ function createServer(): McpServer {
     },
   );
 
+  server.registerTool(
+    'grep_workspace_files',
+    {
+      description:
+        '워크스페이스 내 가시 텍스트 파일에서 문자열 또는 정규표현식 일치 항목을 검색함',
+      inputSchema: z.object({
+        pattern: z.string().min(1).describe('검색할 문자열 또는 정규표현식 패턴임'),
+        path: z.string().default('.').describe('검색을 시작할 상대 경로임'),
+        maxMatches: z.number().int().min(1).max(100).default(30).describe('반환할 최대 일치 건수임'),
+      }),
+    },
+    async ({ pattern, path: relativePath, maxMatches }) => {
+      const { absolutePath: directory } = await resolveAccessiblePath(relativePath);
+      const realWorkspaceRoot = await fs.realpath(workspaceRoot);
+      const files = await collectFiles(directory, realWorkspaceRoot, 3);
+
+      let regex: RegExp;
+      try {
+        regex = new RegExp(pattern, 'i');
+      } catch (error) {
+        const errorMsg = error instanceof Error ? error.message : String(error);
+        return {
+          content: [{ type: 'text', text: `정규표현식 문법 오류임: ${errorMsg}` }],
+          isError: true,
+        };
+      }
+
+      const matches: string[] = [];
+      for (const relFile of files) {
+        if (matches.length >= maxMatches) break;
+        const fullPath = path.join(realWorkspaceRoot, relFile);
+        try {
+          const content = await fs.readFile(fullPath);
+          if (content.includes(0)) continue; // 바이너리 제외
+          const lines = content.toString('utf8').split('\n');
+          for (let i = 0; i < lines.length; i++) {
+            if (regex.test(lines[i])) {
+              matches.push(`${relFile}:${i + 1}: ${lines[i].trim()}`);
+              if (matches.length >= maxMatches) break;
+            }
+          }
+        } catch {
+          // 읽기 실패 파일 건너뜀
+        }
+      }
+
+      return {
+        content: [
+          {
+            type: 'text',
+            text:
+              matches.length > 0
+                ? [`검색 결과 (총 ${matches.length}건 일치함):`, ...matches].join('\n')
+                : '일치하는 내용을 찾지 못함',
+          },
+        ],
+      };
+    },
+  );
+
+  server.registerTool(
+    'workspace_project_summary',
+    {
+      description:
+        '워크스페이스 내 가시 파일들의 확장자별 분포 및 요약 통계를 산출함',
+      inputSchema: z.object({
+        path: z.string().default('.').describe('분석할 기준 상대 디렉터리 경로임'),
+      }),
+    },
+    async ({ path: relativePath }) => {
+      const { absolutePath: directory } = await resolveAccessiblePath(relativePath);
+      const realWorkspaceRoot = await fs.realpath(workspaceRoot);
+      const files = await collectFiles(directory, realWorkspaceRoot, 4);
+
+      const extCount: Record<string, number> = {};
+      for (const file of files) {
+        const ext = path.extname(file) || '(확장자 없음)';
+        extCount[ext] = (extCount[ext] ?? 0) + 1;
+      }
+
+      const sorted = Object.entries(extCount).sort((a, b) => b[1] - a[1]);
+      const lines = [
+        `# 워크스페이스 요약 보고서 (${relativePath})`,
+        `총 가시 파일 수: ${files.length}개`,
+        '',
+        '## 파일 확장자별 통계:',
+        ...sorted.map(([ext, cnt]) => `- ${ext}: ${cnt}개`),
+      ];
+
+      return {
+        content: [{ type: 'text', text: lines.join('\n') }],
+      };
+    },
+  );
+
   return server;
 }
 

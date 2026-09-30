@@ -1,6 +1,6 @@
 # MCP Platform (사내 통합 MCP 게이트웨이 및 데이터 커넥터)
 
-사내 표준 AI 에이전트(Codex, Antigravity, Claude Desktop 등)에게 공공데이터, 조달청 나라장터, 사내 RAG-vLLM 지식 검색, 로컬 워크스페이스 도구를 단일 엔드포인트로 통합 제공하는 엔터프라이즈 MCP 플랫폼임.
+사내 표준 AI 에이전트(Codex, Antigravity, Claude Desktop, VS Code, Cursor 등)에게 공공데이터, 조달청 나라장터, 사내 RAG-vLLM 지식 검색, 로컬 워크스페이스 도구를 단일 엔드포인트로 통합 제공하는 엔터프라이즈 MCP 플랫폼임.
 
 ---
 
@@ -17,8 +17,8 @@ mcp-platform/
 │   ├── servers/
 │   │   ├── mcp-gateway.ts         # 전체 통합 게이트웨이 (stdio)
 │   │   ├── data-go-gateway.ts     # 공공데이터 및 RAG 통합 게이트웨이
-│   │   ├── http-gateway.ts        # 사내 포털 연동용 HTTP/REST 게이트웨이 (:8120)
-│   │   └── workspace-tools.ts     # 로컬 프로젝트 파일 탐색 (읽기 전용)
+│   │   ├── http-gateway.ts        # 사내 포털 연동용 HTTP/REST 게이트웨이 (:8120, OpenAPI 3.0)
+│   │   └── workspace-tools.ts     # 로컬 프로젝트 파일 탐색 및 코드 분석 (읽기 전용)
 │   └── clients/
 │       └── child-mcp-client.ts    # 자식 MCP 프로세스 생명주기 관리자
 ├── connectors/                    # Python FastMCP 데이터 커넥터
@@ -27,18 +27,23 @@ mcp-platform/
 │       │   ├── common.py          # 공공데이터 공통 HTTP, 응답 파싱, 키 마스킹
 │       │   └── cache.py           # In-Memory TTL 캐시 레이어 (API 쿼터 절약)
 │       └── servers/
-│           ├── rag.py             # 사내 RAG-vLLM 지식 검색·AI 질의·기안문 작성
-│           ├── pps.py             # 조달청 나라장터 입찰공고·낙찰·계약 정보
+│           ├── corporate_intelligence.py # 기업 종합 분석 (세무+고용+재무+사내지식 융합)
+│           ├── rag.py             # 사내 RAG-vLLM 지식 검색·AI 질의·문서 인제스트
+│           ├── pps.py             # 조달청 나라장터 입찰공고·발주계획·낙찰·계약 정보
 │           ├── nts.py             # 국세청 사업자등록 진위확인 및 휴폐업 조회
 │           ├── nps.py             # 국민연금 사업장 가입내역 및 고용·급여 추정
 │           ├── fsc.py             # 금융위원회 기업 요약 재무제표 및 재무상태표
 │           ├── portal_catalog.py  # 공공데이터포털 오픈API 및 파일 카탈로그
 │           └── food_safety.py     # 식품안전나라 바코드제품·품목보고·회수식품
+├── cmd/ & internal/               # Go 기반 초경량 고속 MCP stdio 서버/클라이언트
 └── scripts/                       # 실행 및 운영 자동화 스크립트
+    ├── doctor.sh                  # 시스템 상태, 의존성, 포트 종합 진단 스크립트
     ├── register-clients.sh        # Codex, agy, VS Code 등 원클릭 등록 스크립트
     ├── run-mcp-gateway.sh         # mcp-platform 전체 게이트웨이 실행
     ├── run-data-go-portal.sh      # 공공데이터 게이트웨이 실행
-    └── run-internal-rag.sh        # 사내 RAG-vLLM 단독 실행
+    ├── run-internal-rag.sh        # 사내 RAG-vLLM 단독 실행
+    ├── run-corporate-intelligence.sh # 기업 종합 분석 서버 단독 실행
+    └── run-mcp-go-server.sh       # Go MCP 초경량 서버 실행
 ```
 
 ---
@@ -49,10 +54,14 @@ mcp-platform/
 
 | 구분 | 도구명 | 설명 |
 | :--- | :--- | :--- |
+| **기업 종합 분석** | `analyze_company_comprehensive` | 국세청 세무상태 + 국민연금 고용/급여 + 금융위 재무제표 + 사내 RAG 이력을 결합한 종합 진단 |
 | **사내 지식 (RAG)** | `rag_search_documents` | 사내 규정·기안문·매뉴얼 하이브리드(밀집+희소) 벡터 검색 |
 | | `rag_ask_ai` | vLLM 고속 로컬 모델 기반 사내 지식 검증 질의응답 |
 | | `rag_list_documents` | RAG 시스템 등록 문서 목록 페이징 조회 |
+| | `rag_ingest_document` | AI 작성 분석 리포트·기안서를 사내 RAG 지식베이스에 실시간 색인 등록 |
+| | `rag_get_document_detail` | 등록 문서 상세 메타데이터 및 청크 목록 단건 조회 |
 | **조달청 나라장터 (PPS)** | `search_bid_announcements` | 나라장터 입찰공고 기간별 조회 |
+| | `search_order_plans` | 공공기관의 연간 발주계획(사업명, 발주예정시기, 추정금액) 조회 |
 | | `search_successful_bids` | 낙찰 정보(물품/외자/공사/용역) 조회 |
 | | `search_contracts` | 기관별 체결 계약 정보 조회 |
 | | `get_bid_detail` | 입찰공고 상세 내역 단건 조회 |
@@ -67,6 +76,13 @@ mcp-platform/
 | **카탈로그 & 식품안전** | `search_public_datasets` | 공공데이터포털 등록 데이터셋 검색 |
 | | `search_food_products` | 식품안전나라 바코드연계제품 조회 |
 | | `search_food_manufacturing_reports` | 품목제조보고 등록 내역 조회 |
+| **워크스페이스 탐색** | `workspace_status` | 프로젝트 루트 디렉터리 상태 및 목록 조회 |
+| | `list_project_files` | 디렉터리 상대 가시 파일 목록 조회 (깊이 제한) |
+| | `read_project_file` | UTF-8 텍스트 파일 읽기 (256 KiB 샌드박스 제한) |
+| | `grep_workspace_files` | 가시 파일 내 정규식/문자열 패턴 고속 검색 |
+| | `workspace_project_summary` | 확장자별 파일 수 및 프로젝트 통계 요약 |
+| **Go 초경량 런타임** | `health_ping` | Go 런타임 상태 및 하드웨어 가용 지표 즉시 응답 |
+| | `greet` | Go MCP 표준 통신 검증용 도구 |
 
 ### 2.2 리소스 (Resources)
 - `internal://rag/stats`: 사내 RAG-vLLM 색인 현황 및 서비스 상태 실시간 리소스
@@ -80,16 +96,14 @@ mcp-platform/
 
 ## 3. 빠른 시작 및 클라이언트 등록
 
-### 3.1 환경 준비 및 빌드
+### 3.1 시스템 종합 진단
+아래 명령으로 Node.js, Python, RAG-vLLM, API 키, 클라이언트 설정 상태를 원클릭 진단함:
 ```bash
-cd projects/mcp-platform
-npm install
-npm run build
-./scripts/setup-mcp-runtime.sh
+./scripts/doctor.sh
 ```
 
-### 3.2 Codex 및 Antigravity(agy) 원클릭 등록
-아래 스크립트 실행으로 `~/.codex/config.toml`과 `~/.gemini/config/mcp_config.json`에 최신 게이트웨이가 자동 등록 및 갱신됨:
+### 3.2 Codex, Antigravity(agy), VS Code 원클릭 등록
+아래 스크립트 실행으로 `~/.codex/config.toml`과 `~/.gemini/config/mcp_config.json`, `.vscode/mcp.json`에 최신 게이트웨이가 자동 등록 및 갱신됨:
 ```bash
 ./scripts/register-clients.sh
 ```
@@ -99,13 +113,21 @@ npm run build
   ```bash
   ./scripts/run-mcp-gateway.sh
   ```
+- **기업 종합 분석 실행**:
+  ```bash
+  ./scripts/run-corporate-intelligence.sh
+  ```
 - **RAG 단독 실행**:
   ```bash
   ./scripts/run-internal-rag.sh
   ```
-- **HTTP 게이트웨이 (:8120) 실행**:
+- **HTTP 게이트웨이 (:8120) 실행 (OpenAPI 3.0 지원)**:
   ```bash
   npm run start:http-gateway
+  ```
+- **Go 초경량 MCP 클라이언트 검증**:
+  ```bash
+  ./scripts/run-mcp-go-client.sh
   ```
 
 ---
@@ -114,3 +136,4 @@ npm run build
 - 실제 API 키는 프로젝트 루트의 `.env` 파일에서 관리되며 `.gitignore`에 등록되어 있어 저장소에 커밋되지 않음.
 - 모든 API 요청 및 에러 로그는 `redact_sensitive()` 함수를 거쳐 인증키가 터미널이나 클라이언트에 평문 노출되지 않도록 마스킹 처리됨.
 - 공공데이터포털 API 호출 시 `api_cache`(TTL In-Memory 캐시)가 적용되어 불필요한 일일 호출 쿼터 소모를 방지함.
+- 워크스페이스 도구는 샌드박스를 적용하여 `.git`, `.venv`, `.env` 등 민감 파일 및 상위 디렉터리 심볼릭 링크 접근을 원천 차단함.

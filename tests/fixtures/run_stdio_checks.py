@@ -147,7 +147,7 @@ def check_data_go_gateway() -> dict[str, Any]:
     expected_counts = {
         "nps": 3,
         "nts": 3,
-        "pps": 4,
+        "pps": 5,
         "fsc": 4,
         "public_data_catalog": 1,
         "food_safety": 3,
@@ -217,9 +217,36 @@ def check_workspace_server() -> dict[str, Any]:
             listing_text = json.dumps(listing)
             if "visible.txt" not in listing_text or ".env" in listing_text or "outside-link" in listing_text:
                 raise AssertionError(f"workspace listing included hidden entries: {listing}")
+
+            # 신규 도구 검증: grep_workspace_files
+            grep_res = request(
+                process,
+                "tools/call",
+                {"name": "grep_workspace_files", "arguments": {"pattern": "visible"}},
+            )
+            grep_text = json.dumps(grep_res)
+            if "visible.txt" not in grep_text or "private content" in grep_text:
+                raise AssertionError(f"grep failed or leaked private files: {grep_res}")
+
+            # 신규 도구 검증: workspace_project_summary
+            summary_res = request(
+                process,
+                "tools/call",
+                {"name": "workspace_project_summary", "arguments": {}},
+            )
+            summary_text = json.dumps(summary_res)
+            if ".txt" not in summary_text:
+                raise AssertionError(f"workspace summary failed: {summary_res}")
         finally:
             stderr = close(process)
-        return {"visible_file": visible_text, "hidden_blocked": True, "outside_symlink_blocked": True, "stderr": stderr}
+        return {
+            "visible_file": visible_text,
+            "hidden_blocked": True,
+            "outside_symlink_blocked": True,
+            "grep_tested": True,
+            "summary_tested": True,
+            "stderr": stderr,
+        }
 
 
 def check_remote_gateway() -> dict[str, Any]:

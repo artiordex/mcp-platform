@@ -120,3 +120,78 @@ def test_rag_prompt_generation():
     assert "2026 하반기 GPU 인프라 확충안" in prompt_text
     assert "디지털혁신팀" in prompt_text
     assert "rag_search_documents" in prompt_text
+
+
+def test_rag_ingest_document_success(monkeypatch):
+    """RAG 신규 문서 인제스트 도구의 정상 등록 응답을 검증함"""
+    class FakeResponse:
+        status_code = 200
+        def raise_for_status(self):
+            pass
+        def json(self):
+            return {
+                "document_id": "doc-uuid-12345",
+                "name": "2026_인프라계획.md",
+                "chunks_created": 3,
+                "quality_score": 0.96,
+                "quality_grade": "A",
+            }
+
+    class FakeClient:
+        async def __aenter__(self):
+            return self
+        async def __aexit__(self, exc_type, exc_val, exc_tb):
+            pass
+        async def post(self, url, json, headers):
+            return FakeResponse()
+
+    monkeypatch.setattr(rag.httpx, "AsyncClient", lambda **kwargs: FakeClient())
+
+    result = run_async(rag.rag_ingest_document(
+        name="2026_인프라계획.md",
+        text="# 2026년 인프라 계획 본문",
+        department="AI전략팀",
+    ))
+    assert result["success"] is True
+    assert result["document_id"] == "doc-uuid-12345"
+    assert result["chunks_created"] == 3
+
+
+def test_rag_get_document_detail_success(monkeypatch):
+    """RAG 등록 문서 단건 상세 및 청크 조회를 검증함"""
+    class FakeDocResponse:
+        status_code = 200
+        def raise_for_status(self):
+            pass
+        def json(self):
+            return {
+                "id": "doc-uuid-12345",
+                "name": "2026_인프라계획.md",
+                "quality_score": 0.96,
+            }
+
+    class FakeChunkResponse:
+        status_code = 200
+        def json(self):
+            return [
+                {"chunk_index": 0, "text": "청크 1", "token_count": 50},
+                {"chunk_index": 1, "text": "청크 2", "token_count": 60},
+            ]
+
+    class FakeClient:
+        async def __aenter__(self):
+            return self
+        async def __aexit__(self, exc_type, exc_val, exc_tb):
+            pass
+        async def get(self, url, headers):
+            if "chunks" in url:
+                return FakeChunkResponse()
+            return FakeDocResponse()
+
+    monkeypatch.setattr(rag.httpx, "AsyncClient", lambda **kwargs: FakeClient())
+
+    result = run_async(rag.rag_get_document_detail("doc-uuid-12345"))
+    assert result["success"] is True
+    assert result["document"]["name"] == "2026_인프라계획.md"
+    assert result["total_chunks"] == 2
+

@@ -1,3 +1,12 @@
+// =============================================================================
+// 파일명: client.go
+// 경로: internal/mcpclient/client.go
+// 목적: 로컬 stdio 기반 Go MCP 서버와 세션을 맺고 도구를 호출하는 클라이언트를 제공함
+// 작성자: AI전략팀
+// 작성일: 2026-09-30
+// 수정일: 2026-09-30
+// =============================================================================
+
 package mcpclient
 
 import (
@@ -11,8 +20,7 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
-// GreetWithLocalServer demonstrates a Go SDK client connecting to the local
-// Go server over stdio and calling its greet tool.
+// GreetWithLocalServer 함수는 로컬 stdio Go MCP 서버를 기동하고 greet 도구를 호출함
 func GreetWithLocalServer(ctx context.Context, name string) (string, error) {
 	client := mcp.NewClient(&mcp.Implementation{
 		Name:    "mcp-platform-go-client",
@@ -23,7 +31,7 @@ func GreetWithLocalServer(ctx context.Context, name string) (string, error) {
 	command.Stderr = os.Stderr
 	session, err := client.Connect(ctx, &mcp.CommandTransport{Command: command}, nil)
 	if err != nil {
-		return "", fmt.Errorf("connect to local MCP server: %w", err)
+		return "", fmt.Errorf("로컬 MCP 서버 연결 실패함: %w", err)
 	}
 	defer session.Close()
 
@@ -32,7 +40,7 @@ func GreetWithLocalServer(ctx context.Context, name string) (string, error) {
 		Arguments: map[string]any{"name": name},
 	})
 	if err != nil {
-		return "", fmt.Errorf("call greet tool: %w", err)
+		return "", fmt.Errorf("greet 도구 호출 실패함: %w", err)
 	}
 	if result.IsError {
 		messages := make([]string, 0, len(result.Content))
@@ -41,7 +49,7 @@ func GreetWithLocalServer(ctx context.Context, name string) (string, error) {
 				messages = append(messages, text.Text)
 			}
 		}
-		return "", fmt.Errorf("greet tool returned an error: %s", strings.Join(messages, "; "))
+		return "", fmt.Errorf("greet 도구 오류 반환함: %s", strings.Join(messages, "; "))
 	}
 
 	var output struct {
@@ -49,13 +57,13 @@ func GreetWithLocalServer(ctx context.Context, name string) (string, error) {
 	}
 	payload, err := json.Marshal(result.StructuredContent)
 	if err != nil {
-		return "", fmt.Errorf("encode greet result: %w", err)
+		return "", fmt.Errorf("응답 직렬화 실패함: %w", err)
 	}
 	if err := json.Unmarshal(payload, &output); err != nil {
-		return "", fmt.Errorf("decode greet result: %w", err)
+		return "", fmt.Errorf("응답 역직렬화 실패함: %w", err)
 	}
 	if output.Greeting == "" {
-		return "", fmt.Errorf("greet tool returned no greeting")
+		return "", fmt.Errorf("greet 도구 결과 메시지가 비어 있음")
 	}
 
 	return output.Greeting, nil

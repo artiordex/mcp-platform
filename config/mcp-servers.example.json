@@ -2,6 +2,14 @@
   "name": "mcp-platform",
   "servers": [
     {
+      "id": "corporate_intelligence",
+      "label": "Corporate Intelligence Hub",
+      "transport": "stdio",
+      "command": "/bin/bash",
+      "args": ["scripts/run-corporate-intelligence.sh"],
+      "envPassthrough": ["DATA_GO_API_KEY", "API_KEY", "RAG_VLLM_URL", "RAG_API_KEY"]
+    },
+    {
       "id": "internal_rag",
       "label": "Internal RAG-vLLM Knowledge Hub",
       "transport": "stdio",

@@ -28,6 +28,9 @@ case "$server_name" in
   internal-rag)
     python_module="mcp_platform.servers.rag"
     ;;
+  corporate-intelligence)
+    python_module="mcp_platform.servers.corporate_intelligence"
+    ;;
   *)
     cat >&2 <<'USAGE'
 Usage: run-data-go-server.sh <server>
@@ -39,6 +42,8 @@ Servers:
   fsc-financial-info
   public-data-catalog
   food-safety-korea
+  internal-rag
+  corporate-intelligence
 USAGE
     exit 2
     ;;

@@ -55,9 +55,10 @@ const projectRoot = path.resolve(
   '../..',
 );
 
-// 기본 활성화 서버 목록 (사내 RAG, 나라장터, 국민연금, 금융위, 카탈로그, 식품안전나라)
+// 기본 활성화 서버 목록 (사내 RAG, 나라장터, 기업분석, 국민연금, 금융위, 카탈로그, 식품안전나라)
 const defaultServerIds = new Set([
   'rag',
+  'corporate_intelligence',
   'pps',
   'nps',
   'fsc',
@@ -66,6 +67,12 @@ const defaultServerIds = new Set([
 ]);
 
 const serverDefinitions: DataGoServerDefinition[] = [
+  {
+    id: 'corporate_intelligence',
+    label: 'Corporate Intelligence Hub',
+    launcher: 'run-corporate-intelligence.sh',
+    envPassthrough: publicDataEnvironment,
+  },
   {
     id: 'rag',
     label: 'Internal RAG-vLLM Knowledge Hub',

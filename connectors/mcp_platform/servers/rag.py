@@ -199,6 +199,105 @@ async def rag_list_documents(
         return error_result(exc, total_count=0, documents=[])
 
 
+@mcp.tool()
+async def rag_ingest_document(
+    name: str,
+    text: str,
+    department: str = "AI전략팀",
+    source_type: str = "agent_report",
+) -> dict[str, Any]:
+    """분석 보고서, 회의록, 기안문 등 신규 텍스트 문서를 사내 RAG 지식베이스에 실시간 색인 등록함
+
+    Args:
+        name: 문서 제목 또는 식별 파일명임
+        text: 색인할 문서 전문 본문임
+        department: 담당 부서명임 (기본: AI전략팀)
+        source_type: 문서 유형 식별자임 (기본: agent_report)
+
+    Returns:
+        등록된 문서 ID, 생성된 청크 수, 품질 점수 및 상태 객체임
+    """
+    payload = {
+        "name": name,
+        "text": text,
+        "source_type": source_type,
+        "mime_type": "text/markdown",
+        "metadata": {"department": department, "ingested_by": "mcp-platform"},
+        "replace_existing_source": True,
+    }
+
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            resp = await client.post(
+                f"{RAG_BASE_URL}/documents/text",
+                json=payload,
+                headers=_get_headers(),
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            return {
+                "success": True,
+                "document_id": data.get("document_id"),
+                "name": data.get("name"),
+                "chunks_created": data.get("chunks_created", 0),
+                "quality_score": data.get("quality_score"),
+                "quality_grade": data.get("quality_grade"),
+                "message": f"문서 '{name}' 색인 등록을 완료함 (청크 {data.get('chunks_created', 0)}개 생성됨)",
+            }
+    except Exception as exc:
+        return error_result(exc, success=False, document_id=None, chunks_created=0)
+
+
+@mcp.tool()
+async def rag_get_document_detail(
+    document_id: str,
+    include_chunks: bool = True,
+) -> dict[str, Any]:
+    """등록된 문서의 메타데이터, 품질 점수 및 청크 목록 상세를 단건 조회함
+
+    Args:
+        document_id: 문서 고유 UUID 식별자임
+        include_chunks: 원문 청크 텍스트 목록 포함 여부임 (기본: True)
+
+    Returns:
+        문서 상세 정보 및 청크 목록 객체임
+    """
+    try:
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            resp = await client.get(
+                f"{RAG_BASE_URL}/documents/{document_id}",
+                headers=_get_headers(),
+            )
+            resp.raise_for_status()
+            doc = resp.json()
+
+            chunks = []
+            if include_chunks:
+                chunk_resp = await client.get(
+                    f"{RAG_BASE_URL}/documents/{document_id}/chunks",
+                    headers=_get_headers(),
+                )
+                if chunk_resp.status_code == 200:
+                    chunks = [
+                        {
+                            "chunk_index": c.get("chunk_index"),
+                            "text": c.get("text"),
+                            "token_count": c.get("token_count"),
+                        }
+                        for c in chunk_resp.json()
+                    ]
+
+            return {
+                "success": True,
+                "document": doc,
+                "chunks": chunks,
+                "total_chunks": len(chunks),
+            }
+    except Exception as exc:
+        return error_result(exc, success=False, document=None, chunks=[])
+
+
+
 # -----------------------------------------------------------------------------
 # 2. MCP Resources (리소스 - URI 기반 읽기)
 # -----------------------------------------------------------------------------

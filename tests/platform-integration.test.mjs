@@ -34,11 +34,11 @@ test('generic gateway routes configured MCP tools and filters child environment'
 
 test('Data.go gateway starts all public-data MCP servers', () => {
   const result = runCheck('data-go');
-  assert.equal(result.total_tools, 18);
+  assert.equal(result.total_tools, 19);
   assert.deepEqual(result.by_server, {
     nps: 3,
     nts: 3,
-    pps: 4,
+    pps: 5,
     fsc: 4,
     public_data_catalog: 1,
     food_safety: 3,
@@ -56,4 +56,6 @@ test('workspace server blocks hidden files and symlinks outside the workspace', 
   assert.match(result.visible_file, /visible content/);
   assert.equal(result.hidden_blocked, true);
   assert.equal(result.outside_symlink_blocked, true);
+  assert.equal(result.grep_tested, true);
+  assert.equal(result.summary_tested, true);
 });

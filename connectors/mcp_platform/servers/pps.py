@@ -241,6 +241,53 @@ async def get_bid_detail(bid_notice_no: str) -> dict[str, Any]:
         return error_result(exc, success=False, data=None)
 
 
+@mcp.tool()
+async def search_order_plans(
+    start_date: str | None = None,
+    end_date: str | None = None,
+    num_of_rows: int = 10,
+    page_no: int = 1,
+) -> dict[str, Any]:
+    """공공기관의 발주계획(사업명, 발주시기, 추정금액, 발주기관) 목록을 조회함
+
+    Args:
+        start_date: 발주예정일 검색 시작일임 (YYYYMMDD 또는 YYYY-MM-DD)
+        end_date: 발주예정일 검색 종료일임 (YYYYMMDD 또는 YYYY-MM-DD)
+        num_of_rows: 페이지당 조회 건수임 (최대 999)
+        page_no: 페이지 번호임
+
+    Returns:
+        발주계획 목록 및 페이징 메타데이터 객체임
+    """
+    start = format_datetime_for_api(start_date)[:8]
+    end = format_datetime_for_api(end_date or start_date)[:8]
+    cache_key = api_cache.make_key("pps_order_plans", start=start, end=end, rows=num_of_rows, page=page_no)
+    cached = api_cache.get(cache_key)
+    if cached is not None:
+        return cached
+
+    try:
+        body = await _request(
+            "getDataSetOpnStdOrderPlanInfo",
+            {
+                "orderPlanBgnDate": start,
+                "orderPlanEndDate": end,
+                "numOfRows": min(max(num_of_rows, 1), 999),
+                "pageNo": page_no,
+            },
+        )
+        res = _result(
+            body,
+            page_no=page_no,
+            num_of_rows=num_of_rows,
+            search_period=f"{start} ~ {end}",
+        )
+        api_cache.set(cache_key, res, ttl_seconds=600)
+        return res
+    except Exception as exc:
+        return error_result(exc, success=False, items=[], total_count=0, page_no=page_no, num_of_rows=num_of_rows)
+
+
 # -----------------------------------------------------------------------------
 # 2. MCP Prompts (입찰 분석 워크플로우 지원)
 # -----------------------------------------------------------------------------
