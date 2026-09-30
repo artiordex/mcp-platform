@@ -51,3 +51,18 @@ func TestHealthPing(t *testing.T) {
 		t.Errorf("NumCPU는 1 이상이어야 함: %d", output.NumCPU)
 	}
 }
+
+func TestSystemMetrics(t *testing.T) {
+	ctx := context.Background()
+	_, output, err := systemMetrics(ctx, nil, struct{}{})
+	if err != nil {
+		t.Fatalf("system_metrics 실패함: %v", err)
+	}
+
+	if output.NumGoroutine <= 0 {
+		t.Errorf("고루틴 수는 1 이상이어야 함: %d", output.NumGoroutine)
+	}
+	if output.AllocMB == "" || output.SysMB == "" {
+		t.Errorf("메모리 지표 문자열이 비어 있음: alloc=%s, sys=%s", output.AllocMB, output.SysMB)
+	}
+}

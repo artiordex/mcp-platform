@@ -7,9 +7,18 @@
  * 수정일: 2026-09-30
  */
 
+import { execFile } from 'node:child_process';
 import { promises as fs } from 'node:fs';
 import http from 'node:http';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { promisify } from 'node:util';
+
+const execFileAsync = promisify(execFile);
+const projectRoot = path.resolve(
+  path.dirname(fileURLToPath(import.meta.url)),
+  '../..',
+);
 
 const PORT = Number(process.env.MCP_HTTP_PORT ?? process.env.PORT ?? 8120);
 const workspaceRoot = path.resolve(
@@ -267,6 +276,61 @@ const server = http.createServer(async (req, res) => {
   if (req.method === 'GET' && (pathname === '/health' || pathname === '/healthz')) {
     res.writeHead(200, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({ status: 'ok', service: 'mcp-platform', port: PORT, uptime: process.uptime() }));
+    return;
+  }
+
+  if (req.method === 'GET' && pathname === '/servers') {
+    const cliScript = path.resolve(projectRoot, 'scripts/mcp-cli.sh');
+    try {
+      const { stdout } = await execFileAsync(cliScript, ['servers']);
+      const servers = JSON.parse(stdout);
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ success: true, count: servers.length, servers }, null, 2));
+    } catch (err: any) {
+      res.writeHead(500, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ success: false, error: err.message || String(err) }));
+    }
+    return;
+  }
+
+  if (req.method === 'GET' && pathname === '/cache/stats') {
+    const cliScript = path.resolve(projectRoot, 'scripts/mcp-cli.sh');
+    try {
+      const { stdout } = await execFileAsync(cliScript, ['cache', 'stats']);
+      const stats = JSON.parse(stdout);
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ success: true, stats }, null, 2));
+    } catch (err: any) {
+      res.writeHead(500, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ success: false, error: err.message || String(err) }));
+    }
+    return;
+  }
+
+  if (req.method === 'POST' && pathname === '/cache/clear') {
+    const cliScript = path.resolve(projectRoot, 'scripts/mcp-cli.sh');
+    try {
+      const { stdout } = await execFileAsync(cliScript, ['cache', 'clear']);
+      const result = JSON.parse(stdout);
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ success: true, result }, null, 2));
+    } catch (err: any) {
+      res.writeHead(500, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ success: false, error: err.message || String(err) }));
+    }
+    return;
+  }
+
+  if (req.method === 'GET' && pathname === '/doctor') {
+    const doctorScript = path.resolve(projectRoot, 'scripts/doctor.sh');
+    try {
+      const { stdout } = await execFileAsync(doctorScript, []);
+      res.writeHead(200, { 'Content-Type': 'text/plain; charset=utf-8' });
+      res.end(stdout);
+    } catch (err: any) {
+      res.writeHead(200, { 'Content-Type': 'text/plain; charset=utf-8' });
+      res.end(err.stdout || err.message || String(err));
+    }
     return;
   }
 

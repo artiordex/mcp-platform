@@ -2,7 +2,7 @@
 # =============================================================================
 # 파일명: benchmark-e2e.sh
 # 경로: scripts/benchmark-e2e.sh
-# 목적: 실무 시나리오(나라장터 입찰-기업분석-사내RAG-문서인제스트) E2E 실행 및 캐시 성능을 측정함
+# 목적: 실무 시나리오(나라장터 입찰-기업분석-사내RAG-문서인제스트-SMES지원사업-주소-영속캐시) E2E 실행 및 성능을 측정함
 # 작성자: AI전략팀
 # 작성일: 2026-09-30
 # 수정일: 2026-09-30
@@ -22,7 +22,7 @@ echo "================================================================="
 import asyncio
 import time
 from datetime import datetime
-from mcp_platform.servers import pps, corporate_intelligence, rag, dart
+from mcp_platform.servers import address, corporate_intelligence, dart, pps, rag, smes
 
 async def run_scenario():
     print("\n[시나리오 1] 나라장터 최근 입찰공고 및 발주계획 탐색")
@@ -67,9 +67,18 @@ async def run_scenario():
     print(f"  - RAG 색인 등록 완료 (소요시간: {t1 - t0:.3f}초)")
     print(f"  - 문서 ID: {ingest_res.get('document_id')}, 청크 수: {ingest_res.get('chunks_created')}")
 
-    print("\n[시나리오 5] In-Memory TTL 캐시 레이어 성능 측정")
-    # 동일 요청 반복 호출 시 캐시 적중 여부 및 지연시간 비교
+    print("\n[시나리오 5] 중기부 기업마당 지원사업 공고 검색 및 도로명주소 연계")
     t0 = time.perf_counter()
+    smes_res = await smes.search_support_programs(keyword="AI", category="TECH", num_of_rows=2)
+    addr_res = await address.search_address(keyword="판교역로 166", num_of_rows=1)
+    t1 = time.perf_counter()
+    print(f"  - 지원사업 공고 검색 완료: 총 {smes_res.get('total_count', 0)}건 검색됨 (소요시간: {t1 - t0:.3f}초)")
+    print(f"  - 도로명주소 정제 완료: {addr_res.get('items', [{}])[0].get('road_address', '조회됨') if addr_res.get('items') else '완료'}")
+
+    print("\n[시나리오 6] 2계층 영속 캐시(TieredCache: L1 메모리 + L2 SQLite) 계층 성능 측정")
+    from mcp_platform.core.cache import api_cache
+    t0 = time.perf_counter()
+    stats = api_cache.stats()
     corp_cached = await corporate_intelligence.analyze_company_comprehensive(
         company_name="삼성전자",
         include_internal_knowledge=True,
@@ -77,6 +86,7 @@ async def run_scenario():
     t1 = time.perf_counter()
     cached_time = t1 - t0
     print(f"  - 캐시 적중 호출 소요시간: {cached_time:.6f}초")
+    print(f"  - 캐시 스토리지 현황: L1 메모리 {stats.get('l1_memory_entries', 0)}건, L2 SQLite {stats.get('l2_disk_entries', 0)}건")
     print(f"  - 캐시 적중률 및 정합성 검증: {'정상 일치함' if corp == corp_cached else '불일치'}")
 
     print("\n=================================================================")

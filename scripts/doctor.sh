@@ -73,10 +73,23 @@ if [[ -x "$VENV_PYTHON" ]]; then
     report_fail "핵심 Python 패키지 누락됨"
   fi
 
-  if "$VENV_PYTHON" -c "from mcp_platform.servers import rag, pps, nts, nps, fsc, food_safety, portal_catalog, corporate_intelligence, dart, address" >/dev/null 2>&1; then
-    report_ok "전체 10개 FastMCP 커넥터 모듈 로드 정상임"
+  if "$VENV_PYTHON" -c "from mcp_platform.servers import rag, pps, nts, nps, fsc, food_safety, portal_catalog, corporate_intelligence, dart, address, smes" >/dev/null 2>&1; then
+    report_ok "전체 11개 FastMCP 커넥터 모듈 로드 정상임"
   else
     report_fail "일부 FastMCP 커넥터 모듈 로드 실패함"
+  fi
+
+  if [[ -x "$MCP_ROOT/scripts/mcp-cli.sh" && -f "$MCP_ROOT/scripts/mcp-cli.py" ]]; then
+    report_ok "mcp-cli 관리 CLI 유틸리티 준비 완료됨"
+  else
+    report_warn "mcp-cli 관리 CLI 유틸리티가 누락되었거나 실행 권한이 없음"
+  fi
+
+  CACHE_CHECK="$("$MCP_ROOT/scripts/mcp-cli.sh" cache stats 2>/dev/null || echo '{}')"
+  if echo "$CACHE_CHECK" | grep -q '"status": "active"'; then
+    report_ok "TieredCache (L1 메모리 + L2 SQLite) 영속 캐시 계층 정상 가동 중"
+  else
+    report_warn "영속 캐시 계층 진단 응답 이상"
   fi
 else
   report_fail "Python 가상환경($VENV_PYTHON)을 찾을 수 없음"

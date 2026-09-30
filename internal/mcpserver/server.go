@@ -34,6 +34,13 @@ type pingOutput struct {
 	NumCPU    int    `json:"num_cpu" jsonschema:"가용 CPU 코어 수임"`
 }
 
+type metricsOutput struct {
+	NumGoroutine int    `json:"num_goroutine" jsonschema:"실행 중인 고루틴 수임"`
+	AllocMB      string `json:"alloc_mb" jsonschema:"할당된 힙 메모리 용량임"`
+	SysMB        string `json:"sys_mb" jsonschema:"운영체제로부터 할당받은 시스템 메모리 용량임"`
+	NumGC        uint32 `json:"num_gc" jsonschema:"수행된 가비지 컬렉션 주기 횟수임"`
+}
+
 // New 함수는 Go MCP 서버 인스턴스를 생성하고 등록 가능한 도구를 바인딩함
 func New() *mcp.Server {
 	server := mcp.NewServer(&mcp.Implementation{
@@ -55,6 +62,11 @@ func New() *mcp.Server {
 		Name:        "health_ping",
 		Description: "Go 런타임 상태 및 하드웨어 가용 지표를 즉각 응답함",
 	}, healthPing)
+
+	mcp.AddTool(server, &mcp.Tool{
+		Name:        "system_metrics",
+		Description: "실행 중인 고루틴 수 및 메모리(RAM) 할당 지표를 반환함",
+	}, systemMetrics)
 
 	return server
 }
@@ -79,5 +91,17 @@ func healthPing(_ context.Context, _ *mcp.CallToolRequest, _ struct{}) (*mcp.Cal
 		Timestamp: time.Now().Format(time.RFC3339),
 		GoVersion: runtime.Version(),
 		NumCPU:    runtime.NumCPU(),
+	}, nil
+}
+
+func systemMetrics(_ context.Context, _ *mcp.CallToolRequest, _ struct{}) (*mcp.CallToolResult, metricsOutput, error) {
+	var m runtime.MemStats
+	runtime.ReadMemStats(&m)
+
+	return nil, metricsOutput{
+		NumGoroutine: runtime.NumGoroutine(),
+		AllocMB:      fmt.Sprintf("%.2f MB", float64(m.Alloc)/(1024*1024)),
+		SysMB:        fmt.Sprintf("%.2f MB", float64(m.Sys)/(1024*1024)),
+		NumGC:        m.NumGC,
 	}, nil
 }

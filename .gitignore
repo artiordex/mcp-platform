@@ -18,6 +18,7 @@ __pycache__/
 # Python build artifacts
 build/
 dist/
+bin/
 *.egg-info/
 
 # Node dependencies
