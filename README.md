@@ -34,6 +34,7 @@ mcp-platform/
 │           ├── dart.py            # 금융감독원 OpenDART 전자공시 보고서 및 기업 개요
 │           ├── address.py         # 행정안전부 도로명주소 및 행정구역 표준코드
 │           ├── smes.py            # 중소벤처기업부 기업마당 지원사업 공고 및 정책자금
+│           ├── kipris.py          # 특허청 KIPRIS 특허 및 실용신안 출원·등록 정보
 │           ├── rag.py             # 사내 RAG-vLLM 지식 검색·AI 질의·문서 인제스트
 │           ├── pps.py             # 조달청 나라장터 입찰공고·발주계획·낙찰·계약 정보
 │           ├── nts.py             # 국세청 사업자등록 진위확인 및 휴폐업 조회
@@ -57,6 +58,7 @@ mcp-platform/
     ├── run-dart-filings.sh        # DART 전자공시 서버 단독 실행
     ├── run-address-lookup.sh      # 도로명주소 서버 단독 실행
     ├── run-smes-programs.sh       # 중기부 지원사업 서버 단독 실행
+    ├── run-kipris-patents.sh      # 특허청 특허 서버 단독 실행
     └── run-mcp-go-server.sh       # Go MCP 초경량 서버 실행
 ```
 
@@ -93,6 +95,8 @@ mcp-platform/
 | | `get_period_status` | 월별 신규 취득자 및 퇴사자 현황 조회 |
 | **금융위원회 (FSC)** | `get_summary_financial_statement`| 요약 재무제표(매출액, 영업이익, 자산, 부채비율) |
 | | `search_company_financial_info` | 기업 재무제표 종합 분석 텍스트 생성 |
+| **특허청 (KIPRIS)** | `search_patents` | 출원인 또는 기술 키워드 기반 특허 및 실용신안 등록 목록 검색 |
+| | `get_patent_detail` | 출원번호 기반 특허 요약(초록), 대표 청구항, 법적 상태 조회 |
 | **카탈로그 & 식품안전** | `search_public_datasets` | 공공데이터포털 등록 데이터셋 검색 |
 | | `search_food_products` | 식품안전나라 바코드연계제품 조회 |
 | | `search_food_manufacturing_reports` | 품목제조보고 등록 내역 조회 |
@@ -110,12 +114,14 @@ mcp-platform/
 - `catalog://data-go/types`: 공공데이터포털 지원 데이터셋 유형 명세 리소스
 - `dart://report-types`: DART 공시 유형 분류 코드 체계 리소스
 - `smes://categories`: 중소벤처기업부 7대 지원사업 분류 체계 리소스
+- `kipris://ipc-sections`: 국제특허분류(IPC) 8대 섹션 표준 체계 리소스
 
 ### 2.3 프롬프트 (Prompts)
 - `draft_internal_memo`: 사내 규정을 검색하여 표준 공문서·기안서 양식으로 초안을 작성하는 프롬프트
 - `analyze_bid_proposal`: 나라장터 입찰공고를 분석하고 사내 RAG 실적을 매핑하여 제안 전략을 도출하는 프롬프트
 - `audit_company_disclosure`: DART 최근 공시와 재무 상태를 분석하여 계약 리스크를 심사하는 프롬프트
 - `match_company_policy_funds`: 기업 제원(업종, 인원, 분야)에 맞춤화된 정부지원사업 매칭 기안 프롬프트
+- `analyze_patent_competitiveness`: 기업 특허 포트폴리오 기반 기술 진입장벽 및 분쟁 안정성 심사 프롬프트
 
 ---
 

@@ -18,7 +18,7 @@ from mcp.server.fastmcp import FastMCP
 
 from ..core.cache import api_cache
 from ..core.common import error_result
-from . import dart, fsc, nps, nts, rag
+from . import dart, fsc, kipris, nps, nts, rag
 
 mcp = FastMCP("Corporate Intelligence Hub")
 
@@ -98,6 +98,12 @@ async def analyze_company_comprehensive(
     else:
         tasks.append(("dart", asyncio.sleep(0, result=None)))
 
+    # 6. 특허청 KIPRIS 보유 특허 검색
+    if search_name:
+        tasks.append(("kipris", kipris.search_patents(applicant=search_name, num_of_rows=5)))
+    else:
+        tasks.append(("kipris", asyncio.sleep(0, result=None)))
+
     # 병렬 비동기 조회
     task_keys = [t[0] for t in tasks]
     task_coros = [t[1] for t in tasks]
@@ -154,6 +160,17 @@ async def analyze_company_comprehensive(
             ],
         }
 
+    # KIPRIS 특허 포트폴리오
+    kipris_data = gathered.get("kipris")
+    if kipris_data and isinstance(kipris_data, dict) and kipris_data.get("items"):
+        result["patent_portfolio"] = {
+            "total_patents": kipris_data.get("total_count", len(kipris_data["items"])),
+            "recent_patents": [
+                f"[{it.get('status')}] {it.get('title')} ({it.get('application_number')})"
+                for it in kipris_data.get("items", [])[:3]
+            ],
+        }
+
     # 사내 RAG 연관 이력
     rag_data = gathered.get("rag")
     if rag_data and isinstance(rag_data, dict):
@@ -165,8 +182,11 @@ async def analyze_company_comprehensive(
     # 종합 등급 판정 로직
     is_active = (result.get("tax_status") or {}).get("is_active", True)
     has_finance = result.get("financial_summary") is not None
+    has_patents = result.get("patent_portfolio") is not None and result["patent_portfolio"].get("total_patents", 0) > 0
     if not is_active:
         result["overall_grade"] = "주의 (휴폐업 사업자)"
+    elif has_finance and has_patents:
+        result["overall_grade"] = "우수 (재무 건전성 및 특허 기술력 검증됨)"
     elif has_finance:
         result["overall_grade"] = "양호 (재무 및 세무 정상 검증됨)"
     else:

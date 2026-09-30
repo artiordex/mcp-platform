@@ -22,7 +22,7 @@ echo "================================================================="
 import asyncio
 import time
 from datetime import datetime
-from mcp_platform.servers import address, corporate_intelligence, dart, pps, rag, smes
+from mcp_platform.servers import address, corporate_intelligence, dart, kipris, pps, rag, smes
 
 async def run_scenario():
     print("\n[시나리오 1] 나라장터 최근 입찰공고 및 발주계획 탐색")
@@ -67,13 +67,15 @@ async def run_scenario():
     print(f"  - RAG 색인 등록 완료 (소요시간: {t1 - t0:.3f}초)")
     print(f"  - 문서 ID: {ingest_res.get('document_id')}, 청크 수: {ingest_res.get('chunks_created')}")
 
-    print("\n[시나리오 5] 중기부 기업마당 지원사업 공고 검색 및 도로명주소 연계")
+    print("\n[시나리오 5] 중기부 지원사업, 특허청 특허 및 도로명주소 연계")
     t0 = time.perf_counter()
     smes_res = await smes.search_support_programs(keyword="AI", category="TECH", num_of_rows=2)
+    patent_res = await kipris.search_patents(applicant="삼성전자", keyword="인공지능", num_of_rows=2)
     addr_res = await address.search_address(keyword="판교역로 166", num_of_rows=1)
     t1 = time.perf_counter()
-    print(f"  - 지원사업 공고 검색 완료: 총 {smes_res.get('total_count', 0)}건 검색됨 (소요시간: {t1 - t0:.3f}초)")
-    print(f"  - 도로명주소 정제 완료: {addr_res.get('items', [{}])[0].get('road_address', '조회됨') if addr_res.get('items') else '완료'}")
+    print(f"  - 지원사업 공고 검색 완료: 총 {smes_res.get('total_count', 0)}건 검색됨")
+    print(f"  - 특허청 특허 검색 완료: 총 {patent_res.get('total_count', 0)}건 검색됨")
+    print(f"  - 도로명주소 정제 완료: {addr_res.get('items', [{}])[0].get('road_address', '조회됨') if addr_res.get('items') else '완료'} (합계 소요시간: {t1 - t0:.3f}초)")
 
     print("\n[시나리오 6] 2계층 영속 캐시(TieredCache: L1 메모리 + L2 SQLite) 계층 성능 측정")
     from mcp_platform.core.cache import api_cache

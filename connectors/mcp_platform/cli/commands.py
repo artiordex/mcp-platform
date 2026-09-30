@@ -27,6 +27,7 @@ SERVER_REGISTRY: dict[str, tuple[str, str]] = {
     "dart": ("mcp_platform.servers.dart", "금융감독원 OpenDART 전자공시"),
     "address": ("mcp_platform.servers.address", "행정안전부 도로명주소 및 행정구역"),
     "smes": ("mcp_platform.servers.smes", "중소벤처기업부 기업마당 지원사업"),
+    "kipris": ("mcp_platform.servers.kipris", "특허청 KIPRIS 특허 및 실용신안"),
     "portal_catalog": ("mcp_platform.servers.portal_catalog", "공공데이터포털 데이터셋 카탈로그"),
     "food_safety": ("mcp_platform.servers.food_safety", "식품안전나라 위해식품 및 인허가 정보"),
 }

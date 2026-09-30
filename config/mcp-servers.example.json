@@ -113,6 +113,14 @@
       "command": "/bin/bash",
       "args": ["scripts/run-smes-programs.sh"],
       "envPassthrough": ["BIZINFO_API_KEY", "DATA_GO_API_KEY"]
+    },
+    {
+      "id": "kipris_patents",
+      "label": "KIPRIS Patent and Utility Model Information",
+      "transport": "stdio",
+      "command": "/bin/bash",
+      "args": ["scripts/run-kipris-patents.sh"],
+      "envPassthrough": ["KIPRIS_API_KEY", "DATA_GO_API_KEY"]
     }
   ]
 }

@@ -40,6 +40,9 @@ case "$server_name" in
   smes-programs)
     python_module="mcp_platform.servers.smes"
     ;;
+  kipris-patents)
+    python_module="mcp_platform.servers.kipris"
+    ;;
   *)
     cat >&2 <<'USAGE'
 Usage: run-data-go-server.sh <server>
@@ -56,6 +59,7 @@ Servers:
   dart-filings
   address-lookup
   smes-programs
+  kipris-patents
 USAGE
     exit 2
     ;;

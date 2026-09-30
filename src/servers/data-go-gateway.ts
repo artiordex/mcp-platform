@@ -33,6 +33,7 @@ const publicDataEnvironment = [
   'DART_API_KEY',
   'JUSO_API_KEY',
   'BIZINFO_API_KEY',
+  'KIPRIS_API_KEY',
   'RAG_VLLM_URL',
   'RAG_API_KEY',
   'HTTP_PROXY',
@@ -58,7 +59,7 @@ const projectRoot = path.resolve(
   '../..',
 );
 
-// 기본 활성화 서버 목록 (사내 RAG, 나라장터, 기업분석, 국민연금, 금융위, 카탈로그, 식품안전나라, DART, 도로명주소, 지원사업)
+// 기본 활성화 서버 목록 (사내 RAG, 나라장터, 기업분석, 국민연금, 금융위, 카탈로그, 식품안전나라, DART, 도로명주소, 지원사업, 특허청)
 const defaultServerIds = new Set([
   'rag',
   'corporate_intelligence',
@@ -70,6 +71,7 @@ const defaultServerIds = new Set([
   'dart',
   'address',
   'smes',
+  'kipris',
 ]);
 
 const serverDefinitions: DataGoServerDefinition[] = [
@@ -137,6 +139,12 @@ const serverDefinitions: DataGoServerDefinition[] = [
     id: 'smes',
     label: 'SMES Support Programs',
     launcher: 'run-smes-programs.sh',
+    envPassthrough: publicDataEnvironment,
+  },
+  {
+    id: 'kipris',
+    label: 'KIPRIS Patent and Utility Model',
+    launcher: 'run-kipris-patents.sh',
     envPassthrough: publicDataEnvironment,
   },
 ];
