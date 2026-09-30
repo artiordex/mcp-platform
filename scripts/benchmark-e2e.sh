@@ -91,10 +91,16 @@ async def run_scenario():
     print(f"  - 캐시 스토리지 현황: L1 메모리 {stats.get('l1_memory_entries', 0)}건, L2 SQLite {stats.get('l2_disk_entries', 0)}건")
     print(f"  - 캐시 적중률 및 정합성 검증: {'정상 일치함' if corp == corp_cached else '불일치'}")
 
-    print("\n=================================================================")
-    print("      모든 실무 시나리오 E2E 파이프라인 검증 성공함 (Pass)      ")
-    print("=================================================================")
-
 if __name__ == "__main__":
     asyncio.run(run_scenario())
 EOF
+
+echo ""
+echo "[시나리오 7] Go 초경량 런타임 & 고루틴 병렬 배치 수집기 성능 측정"
+go run "$MCP_ROOT/cmd/batch-collector" -mode all
+
+echo ""
+echo "================================================================="
+echo "      모든 실무 시나리오 E2E 파이프라인 검증 성공함 (Pass)      "
+echo "================================================================="
+

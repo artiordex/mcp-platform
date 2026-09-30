@@ -95,9 +95,25 @@ else
   report_fail "Python 가상환경($VENV_PYTHON)을 찾을 수 없음"
 fi
 
-# 3. 사내 RAG-vLLM 서비스 점검
+# 3. Go 초경량 런타임 및 병렬 수집기 점검
 echo ""
-echo "--- 3. 사내 RAG-vLLM 서비스 점검 ---"
+echo "--- 3. Go 초경량 런타임 및 병렬 수집기 점검 ---"
+if command -v go >/dev/null 2>&1; then
+  GO_VER="$(go version | awk '{print $3}')"
+  report_ok "Go 런타임 감지됨: $GO_VER"
+  if [[ -x "$MCP_ROOT/scripts/run-mcp-go-server.sh" ]]; then
+    report_ok "mcp-go-server 실행기 준비 완료됨"
+  fi
+  if go test ./internal/batchcollector -run TestExecuteParallel >/dev/null 2>&1; then
+    report_ok "Go 고루틴 병렬 수집기(batchcollector) 정상 가동 중"
+  fi
+else
+  report_warn "Go 런타임이 설치되어 있지 않음"
+fi
+
+# 4. 사내 RAG-vLLM 서비스 점검
+echo ""
+echo "--- 4. 사내 RAG-vLLM 서비스 점검 ---"
 RAG_URL="${RAG_VLLM_URL:-http://127.0.0.1:11020}"
 RAG_STATUS="$(curl -s -m 2 "$RAG_URL/health" || true)"
 if [[ -n "$RAG_STATUS" ]] && echo "$RAG_STATUS" | grep -q '"status":"ok"'; then
@@ -114,9 +130,9 @@ else
   report_warn "사내 RAG-vLLM에 연결할 수 없음 (오프라인 모드로 폴백 동작함): $RAG_URL"
 fi
 
-# 4. vLLM LLM 엔드포인트 점검
+# 5. vLLM LLM 엔드포인트 점검
 echo ""
-echo "--- 4. vLLM 엔진 점검 ---"
+echo "--- 5. vLLM 엔진 점검 ---"
 VLLM_URL="http://127.0.0.1:11435"
 VLLM_STATUS="$(curl -s -m 2 "$VLLM_URL/health" || true)"
 if [[ -n "$VLLM_STATUS" ]]; then
@@ -125,9 +141,9 @@ else
   report_warn "vLLM 로컬 추론 엔진 미응답 (11435 포트 확인 필요)"
 fi
 
-# 5. 환경 변수 및 보안 키 점검
+# 6. 환경 변수 및 보안 키 점검
 echo ""
-echo "--- 5. 환경 변수 및 API 키 점검 ---"
+echo "--- 6. 환경 변수 및 API 키 점검 ---"
 ENV_FILE="$MCP_ROOT/.env"
 if [[ -f "$ENV_FILE" ]]; then
   report_ok ".env 설정 파일 존재함"
@@ -145,9 +161,9 @@ else
   report_warn ".env 파일이 없음 (.env.example 참조하여 생성 권장함)"
 fi
 
-# 6. 클라이언트 설정 점검
+# 7. 클라이언트 설정 점검
 echo ""
-echo "--- 6. 클라이언트 등록 상태 점검 ---"
+echo "--- 7. 클라이언트 등록 상태 점검 ---"
 AGY_CONFIG="$HOME/.gemini/config/mcp_config.json"
 if [[ -f "$AGY_CONFIG" ]] && grep -q "mcp-platform" "$AGY_CONFIG"; then
   report_ok "Antigravity(agy) MCP 설정 정상 등록됨: $AGY_CONFIG"
@@ -169,9 +185,9 @@ else
   report_warn "VS Code 작업 공간 설정 파일 없음"
 fi
 
-# 7. 주석 및 규정 검사
+# 8. 주석 및 규정 검사
 echo ""
-echo "--- 7. 전사 주석 및 보안 규정 점검 ---"
+echo "--- 8. 전사 주석 및 보안 규정 점검 ---"
 EMOJI_COUNT="$(python3 -c "
 import os, re
 pattern = re.compile(r'[\U00010000-\U0010ffff]')

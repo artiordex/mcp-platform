@@ -1,7 +1,7 @@
 // =============================================================================
 // 파일명: server.go
 // 경로: internal/mcpserver/server.go
-// 목적: 고성능 경량 Go 기반 stdio MCP 서버 및 기본 도구를 제공함
+// 목적: 고루틴 병렬 수집기 및 고성능 Go stdio MCP 서버를 제공함
 // 작성자: AI전략팀
 // 작성일: 2026-09-30
 // 수정일: 2026-09-30
@@ -16,6 +16,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/artiordex/mcp-platform/internal/batchcollector"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
@@ -41,13 +42,29 @@ type metricsOutput struct {
 	NumGC        uint32 `json:"num_gc" jsonschema:"수행된 가비지 컬렉션 주기 횟수임"`
 }
 
+type batchBidsInput struct {
+	Keywords    []string `json:"keywords" jsonschema:"수집할 키워드 목록(예: AI, 클라우드, 데이터)임"`
+	DaysBack    int      `json:"days_back,omitempty" jsonschema:"과거 며칠간의 공고를 수집할지 일수(기본값 7)임"`
+	Concurrency int      `json:"concurrency,omitempty" jsonschema:"동시 고루틴 워커 수(기본값 5)임"`
+}
+
+type batchCorporateInput struct {
+	BusinessNumbers []string `json:"business_numbers" jsonschema:"검증할 사업자등록번호 목록(10자리)임"`
+	Concurrency     int      `json:"concurrency,omitempty" jsonschema:"동시 고루틴 워커 수(기본값 8)임"`
+}
+
+type benchmarkCollectorInput struct {
+	ItemCount   int `json:"item_count,omitempty" jsonschema:"벤치마크 테스트 항목 수(기본값 20)임"`
+	Concurrency int `json:"concurrency,omitempty" jsonschema:"동시 고루틴 워커 수(기본값 10)임"`
+}
+
 // New 함수는 Go MCP 서버 인스턴스를 생성하고 등록 가능한 도구를 바인딩함
 func New() *mcp.Server {
 	server := mcp.NewServer(&mcp.Implementation{
 		Name:    "mcp-platform-go-server",
 		Version: "0.1.0",
 	}, &mcp.ServerOptions{
-		Instructions: "mcp-platform 초경량 Go stdio MCP 서버임",
+		Instructions: "mcp-platform 고성능 병렬 수집기 및 초경량 Go stdio MCP 서버임",
 		Capabilities: &mcp.ServerCapabilities{
 			Tools: &mcp.ToolCapabilities{},
 		},
@@ -67,6 +84,21 @@ func New() *mcp.Server {
 		Name:        "system_metrics",
 		Description: "실행 중인 고루틴 수 및 메모리(RAM) 할당 지표를 반환함",
 	}, systemMetrics)
+
+	mcp.AddTool(server, &mcp.Tool{
+		Name:        "batch_collect_bids",
+		Description: "복수 키워드 및 기간에 대해 나라장터 입찰공고를 고루틴 워커 풀로 병렬 수집함",
+	}, batchCollectBids)
+
+	mcp.AddTool(server, &mcp.Tool{
+		Name:        "batch_validate_corporate",
+		Description: "다수 기업의 사업자등록번호 진위를 고루틴 병렬로 초고속 검증함",
+	}, batchValidateCorporate)
+
+	mcp.AddTool(server, &mcp.Tool{
+		Name:        "benchmark_parallel_collector",
+		Description: "순차 처리 대비 고루틴 병렬 처리의 가속비 및 성능 지표를 측정함",
+	}, benchmarkParallelCollector)
 
 	return server
 }
@@ -104,4 +136,28 @@ func systemMetrics(_ context.Context, _ *mcp.CallToolRequest, _ struct{}) (*mcp.
 		SysMB:        fmt.Sprintf("%.2f MB", float64(m.Sys)/(1024*1024)),
 		NumGC:        m.NumGC,
 	}, nil
+}
+
+func batchCollectBids(ctx context.Context, _ *mcp.CallToolRequest, input batchBidsInput) (*mcp.CallToolResult, batchcollector.BatchBidsResult, error) {
+	result := batchcollector.CollectBidsParallel(ctx, input.Keywords, input.DaysBack, input.Concurrency)
+	return nil, result, nil
+}
+
+func batchValidateCorporate(ctx context.Context, _ *mcp.CallToolRequest, input batchCorporateInput) (*mcp.CallToolResult, batchcollector.BatchCorporateResult, error) {
+	result := batchcollector.ValidateCorporateParallel(ctx, input.BusinessNumbers, input.Concurrency)
+	return nil, result, nil
+}
+
+func benchmarkParallelCollector(ctx context.Context, _ *mcp.CallToolRequest, input benchmarkCollectorInput) (*mcp.CallToolResult, batchcollector.BenchmarkComparison, error) {
+	count := input.ItemCount
+	if count <= 0 {
+		count = 20
+	}
+	concurrency := input.Concurrency
+	if concurrency <= 0 {
+		concurrency = 10
+	}
+
+	result := batchcollector.RunBenchmark(ctx, count, concurrency, 5*time.Millisecond)
+	return nil, result, nil
 }

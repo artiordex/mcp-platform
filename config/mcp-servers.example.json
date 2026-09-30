@@ -122,6 +122,14 @@
       "command": "/bin/bash",
       "args": ["scripts/run-kipris-patents.sh"],
       "envPassthrough": ["KIPRIS_API_KEY", "DATA_GO_API_KEY"]
+    },
+    {
+      "id": "go_runtime",
+      "label": "Go High-Performance Batch Runtime",
+      "transport": "stdio",
+      "command": "/bin/bash",
+      "args": ["scripts/run-mcp-go-server.sh"],
+      "allowWriteTools": false
     }
   ]
 }
