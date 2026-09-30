@@ -1,7 +1,7 @@
 /**
  * 파일명: child-mcp-client.ts
  * 경로: src/clients/child-mcp-client.ts
- * 목적: 하위 MCP 서버 프로세스(stdio) 및 원격 엔드포인트(HTTP)와의 연결·도구 호출을 감독함
+ * 목적: 하위 MCP 서버 프로세스(stdio) 및 원격 엔드포인트(HTTP)와의 연결·도구·리소스·프롬프트 통신을 감독함
  * 작성자: AI전략팀
  * 작성일: 2026-09-30
  * 수정일: 2026-09-30
@@ -11,7 +11,6 @@ import {
   Client,
   StreamableHTTPClientTransport,
   type CallToolResult,
-  type Tool,
   type Transport,
 } from '@modelcontextprotocol/client';
 import {
@@ -21,6 +20,8 @@ import {
 import { type Stream } from 'node:stream';
 
 export type JsonObject = Record<string, unknown>;
+
+export type ChildClientStatus = 'uninitialized' | 'ready' | 'error' | 'stopped';
 
 export type ChildMcpServerConfig =
   | (Pick<StdioServerParameters, 'command' | 'args' | 'cwd' | 'maxBufferSize'> & {
@@ -37,7 +38,39 @@ export type ChildMcpServerConfig =
       requestTimeoutMs?: number;
     };
 
-export type ChildTool = Pick<Tool, 'name' | 'description' | 'inputSchema'>;
+export type ChildTool = {
+  name: string;
+  description?: string;
+  inputSchema?: Record<string, unknown>;
+  annotations?: {
+    audience?: string[];
+    priority?: number;
+    readOnlyHint?: boolean;
+    [key: string]: unknown;
+  };
+};
+
+export type ChildResource = {
+  uri: string;
+  name: string;
+  description?: string;
+  mimeType?: string;
+  annotations?: {
+    audience?: string[];
+    priority?: number;
+    [key: string]: unknown;
+  };
+};
+
+export type ChildPrompt = {
+  name: string;
+  description?: string;
+  arguments?: Array<{
+    name: string;
+    description?: string;
+    required?: boolean;
+  }>;
+};
 
 /**
  * 값이 유효한 JSON 객체인지 검증함
@@ -104,6 +137,8 @@ export class ChildMcpClient {
   private readonly secrets: string[] = [];
   private closed = false;
   private closing: Promise<void> | undefined;
+  private _status: ChildClientStatus = 'uninitialized';
+  private _lastError: string | undefined;
 
   constructor(
     private readonly serverId: string,
@@ -146,10 +181,27 @@ export class ChildMcpClient {
     }
 
     this.transport.onerror = (error) => {
+      this._lastError = error.message;
       process.stderr.write(
         `[mcp-platform:${this.serverId}] ${redactSecrets(error.message, this.secrets)}\n`,
       );
     };
+  }
+
+  get id(): string {
+    return this.serverId;
+  }
+
+  get displayName(): string {
+    return this.label;
+  }
+
+  get status(): ChildClientStatus {
+    return this._status;
+  }
+
+  get lastError(): string | undefined {
+    return this._lastError;
   }
 
   private pipeChildStderr(stderr: Stream): void {
@@ -163,15 +215,35 @@ export class ChildMcpClient {
    * 하위 서버와 MCP 핸드셰이크 프로토콜 연결을 수행함
    */
   async initialize(): Promise<void> {
-    await this.client.connect(this.transport, { timeout: this.requestTimeoutMs });
+    try {
+      await this.client.connect(this.transport, { timeout: this.requestTimeoutMs });
+      this._status = 'ready';
+      this._lastError = undefined;
+    } catch (error) {
+      this._status = 'error';
+      this._lastError = describeError(error);
+      throw error;
+    }
   }
 
   /**
    * 하위 서버가 제공하는 도구 목록을 조회함
    */
   async listTools(): Promise<ChildTool[]> {
-    const result = await this.client.listTools({}, { timeout: this.requestTimeoutMs });
-    return result.tools;
+    if (this._status !== 'ready') {
+      return [];
+    }
+    const capabilities = this.client.getServerCapabilities();
+    if (!capabilities?.tools) {
+      return [];
+    }
+    try {
+      const result = await this.client.listTools({}, { timeout: this.requestTimeoutMs });
+      return (result.tools ?? []) as ChildTool[];
+    } catch (error) {
+      this._lastError = describeError(error);
+      return [];
+    }
   }
 
   /**
@@ -188,6 +260,64 @@ export class ChildMcpClient {
   }
 
   /**
+   * 하위 서버가 제공하는 리소스 목록을 조회함
+   */
+  async listResources(): Promise<ChildResource[]> {
+    if (this._status !== 'ready') {
+      return [];
+    }
+    const capabilities = this.client.getServerCapabilities();
+    if (!capabilities?.resources) {
+      return [];
+    }
+    try {
+      const result = await this.client.listResources({}, { timeout: this.requestTimeoutMs });
+      return (result.resources ?? []) as ChildResource[];
+    } catch {
+      return [];
+    }
+  }
+
+  /**
+   * 하위 서버의 특정 리소스를 URI로 읽음
+   */
+  async readResource(uri: string): Promise<Awaited<ReturnType<Client['readResource']>>> {
+    return this.client.readResource({ uri }, { timeout: this.requestTimeoutMs });
+  }
+
+  /**
+   * 하위 서버가 제공하는 프롬프트 목록을 조회함
+   */
+  async listPrompts(): Promise<ChildPrompt[]> {
+    if (this._status !== 'ready') {
+      return [];
+    }
+    const capabilities = this.client.getServerCapabilities();
+    if (!capabilities?.prompts) {
+      return [];
+    }
+    try {
+      const result = await this.client.listPrompts({}, { timeout: this.requestTimeoutMs });
+      return (result.prompts ?? []) as ChildPrompt[];
+    } catch {
+      return [];
+    }
+  }
+
+  /**
+   * 하위 서버의 특정 프롬프트를 인자와 함께 가져옴
+   */
+  async getPrompt(
+    name: string,
+    args?: Record<string, string>,
+  ): Promise<Awaited<ReturnType<Client['getPrompt']>>> {
+    return this.client.getPrompt(
+      { name, arguments: args },
+      { timeout: this.requestTimeoutMs },
+    );
+  }
+
+  /**
    * 하위 서버 연결 및 프로세스를 정상 종료함
    */
   close(): Promise<void> {
@@ -199,6 +329,7 @@ export class ChildMcpClient {
     }
 
     this.closed = true;
+    this._status = 'stopped';
     this.closing = this.client.close();
     return this.closing;
   }

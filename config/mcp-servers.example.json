@@ -15,7 +15,8 @@
       "transport": "stdio",
       "command": "/bin/bash",
       "args": ["scripts/run-internal-rag.sh"],
-      "envPassthrough": ["RAG_VLLM_URL", "RAG_API_KEY"]
+      "envPassthrough": ["RAG_VLLM_URL", "RAG_API_KEY"],
+      "allowWriteTools": false
     },
     {
       "id": "playwright",

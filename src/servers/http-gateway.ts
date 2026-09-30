@@ -1,18 +1,29 @@
 /**
  * 파일명: http-gateway.ts
  * 경로: src/servers/http-gateway.ts
- * 목적: 사내 웹 포털(8080/mcp) 및 외부 HTTP 클라이언트 연동용 REST/JSON 게이트웨이를 제공함
+ * 목적: 표준 MCP Streamable HTTP 전송(/mcp) 및 사내 포털 연동용 REST API(/api/*)를 제공함
  * 작성자: AI전략팀
  * 작성일: 2026-09-30
  * 수정일: 2026-09-30
  */
 
 import { execFile } from 'node:child_process';
+import { randomUUID } from 'node:crypto';
 import { promises as fs } from 'node:fs';
 import http from 'node:http';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
+
+import {
+  McpServer,
+  WebStandardStreamableHTTPServerTransport,
+  localhostAllowedHostnames,
+  localhostAllowedOrigins,
+  validateHostHeader,
+  validateOriginHeader,
+} from '@modelcontextprotocol/server';
+import * as z from 'zod/v4';
 
 const execFileAsync = promisify(execFile);
 const projectRoot = path.resolve(
@@ -20,7 +31,56 @@ const projectRoot = path.resolve(
   '../..',
 );
 
+// 1. 네트워크 및 보안 기본 설정
 const PORT = Number(process.env.MCP_HTTP_PORT ?? process.env.PORT ?? 8120);
+const HOST = process.env.MCP_HTTP_HOST ?? '127.0.0.1';
+const bearerToken = process.env.MCP_HTTP_BEARER_TOKEN;
+const adminToken = process.env.MCP_ADMIN_TOKEN ?? bearerToken;
+const enableWorkspaceHttp = process.env.MCP_ENABLE_WORKSPACE_HTTP === 'true';
+
+const MAX_BODY_BYTES = 1024 * 1024; // 1 MB
+const REQUEST_TIMEOUT_MS = 30_000; // 30초
+
+/**
+ * IP/호스트명이 루프백 주소인지 판별함
+ */
+function isLoopbackAddress(host: string): boolean {
+  return (
+    host === '127.0.0.1' ||
+    host === 'localhost' ||
+    host === '::1' ||
+    host === '[::1]' ||
+    host.startsWith('127.') ||
+    host === '::ffff:127.0.0.1'
+  );
+}
+
+// 비루프백 주소 바인딩 시 인증 토큰 강제 검증
+if (!isLoopbackAddress(HOST) && !bearerToken) {
+  console.error(
+    `[mcp-platform] 보안 오류: 비루프백 주소(${HOST})로 바인딩 시 MCP_HTTP_BEARER_TOKEN 환경변수가 반드시 설정되어야 함`,
+  );
+  process.exit(1);
+}
+
+// Host 및 Origin 허용 목록 구성
+const customAllowedHosts = process.env.MCP_ALLOWED_HOSTS?.split(',')
+  .map((h) => h.trim())
+  .filter(Boolean);
+const allowedHostnames =
+  customAllowedHosts && customAllowedHosts.length > 0
+    ? customAllowedHosts
+    : localhostAllowedHostnames();
+
+const customAllowedOrigins = process.env.MCP_ALLOWED_ORIGINS?.split(',')
+  .map((o) => o.trim())
+  .filter(Boolean);
+const allowedOriginHostnames =
+  customAllowedOrigins && customAllowedOrigins.length > 0
+    ? customAllowedOrigins
+    : localhostAllowedOrigins();
+
+// 2. 워크스페이스 샌드박스 설정
 const workspaceRoot = path.resolve(
   process.env.MCP_WORKSPACE_ROOT ?? process.cwd(),
 );
@@ -34,7 +94,7 @@ const ignoredDirectories = new Set([
 ]);
 
 /**
- * 상대경로를 워크스페이스 절대경로로 변환하고 상위 경로 탈출을 차단함
+ * 상대경로를 워크스페이스 절대경로로 변환하고 상위 탈출을 차단함
  */
 function resolveWorkspacePath(relativePath: string): string {
   if (relativePath.includes('\0')) {
@@ -118,50 +178,19 @@ async function collectFiles(
   return files;
 }
 
-// HTTP 게이트웨이 노출 도구 목록 정의
-const TOOLS = [
-  {
-    name: 'workspace_status',
-    description: '설정된 워크스페이스 루트의 기본 정보를 반환함 (읽기 전용임)',
-    parameters: {},
-  },
-  {
-    name: 'list_project_files',
-    description: '워크스페이스 상대 디렉터리의 가시 파일 목록을 반환함 (읽기 전용임)',
-    parameters: {
-      path: { type: 'string', default: '.', description: '워크스페이스 기준 상대 디렉터리 경로임' },
-      maxDepth: { type: 'number', default: 2, description: '최대 탐색 깊이임' },
-    },
-  },
-  {
-    name: 'read_project_file',
-    description: '워크스페이스 상대경로의 텍스트 파일 내용을 읽음 (최대 256KB 제한함)',
-    parameters: {
-      path: { type: 'string', required: true, description: '워크스페이스 기준 상대 파일 경로임' },
-    },
-  },
-  {
-    name: 'grep_workspace_files',
-    description: '워크스페이스 내 텍스트 파일에서 문자열 또는 정규표현식 일치 항목을 검색함',
-    parameters: {
-      pattern: { type: 'string', required: true, description: '검색할 정규표현식 또는 문자열임' },
-      path: { type: 'string', default: '.', description: '검색을 시작할 상대 경로임' },
-      maxMatches: { type: 'number', default: 30, description: '최대 반환 일치 건수임' },
-    },
-  },
-  {
-    name: 'workspace_project_summary',
-    description: '워크스페이스 내 가시 파일들의 확장자별 분포 및 요약 통계를 산출함',
-    parameters: {
-      path: { type: 'string', default: '.', description: '분석할 상대 디렉터리 경로임' },
-    },
-  },
-];
-
 /**
- * 도구 호출 요청을 처리하고 결과를 반환함
+ * 워크스페이스 도구 실행 핸들러임
  */
-async function handleToolCall(name: string, args: Record<string, any>): Promise<any> {
+async function handleWorkspaceToolCall(
+  name: string,
+  args: Record<string, any>,
+): Promise<unknown> {
+  if (!enableWorkspaceHttp) {
+    throw new Error(
+      'HTTP 워크스페이스 파일 접근이 비활성화됨. MCP_ENABLE_WORKSPACE_HTTP=true 설정 필요함',
+    );
+  }
+
   if (name === 'workspace_status') {
     const entries = await fs.readdir(workspaceRoot, { withFileTypes: true });
     const visibleEntries = entries
@@ -258,11 +287,199 @@ async function handleToolCall(name: string, args: Record<string, any>): Promise<
   throw new Error(`알 수 없는 도구명임: ${name}`);
 }
 
+const WORKSPACE_TOOLS_DEFINITION = [
+  {
+    name: 'workspace_status',
+    description: '설정된 워크스페이스 루트의 기본 정보를 반환함 (읽기 전용임)',
+    parameters: {},
+    enabled: enableWorkspaceHttp,
+  },
+  {
+    name: 'list_project_files',
+    description: '워크스페이스 상대 디렉터리의 가시 파일 목록을 반환함 (읽기 전용임)',
+    parameters: {
+      path: { type: 'string', default: '.', description: '워크스페이스 기준 상대 디렉터리 경로임' },
+      maxDepth: { type: 'number', default: 2, description: '최대 탐색 깊이임' },
+    },
+    enabled: enableWorkspaceHttp,
+  },
+  {
+    name: 'read_project_file',
+    description: '워크스페이스 상대경로의 텍스트 파일 내용을 읽음 (최대 256KB 제한함)',
+    parameters: {
+      path: { type: 'string', required: true, description: '워크스페이스 기준 상대 파일 경로임' },
+    },
+    enabled: enableWorkspaceHttp,
+  },
+  {
+    name: 'grep_workspace_files',
+    description: '워크스페이스 내 텍스트 파일에서 문자열 또는 정규표현식 일치 항목을 검색함',
+    parameters: {
+      pattern: { type: 'string', required: true, description: '검색할 정규표현식 또는 문자열임' },
+      path: { type: 'string', default: '.', description: '검색을 시작할 상대 경로임' },
+      maxMatches: { type: 'number', default: 30, description: '최대 반환 일치 건수임' },
+    },
+    enabled: enableWorkspaceHttp,
+  },
+  {
+    name: 'workspace_project_summary',
+    description: '워크스페이스 내 가시 파일들의 확장자별 분포 및 요약 통계를 산출함',
+    parameters: {
+      path: { type: 'string', default: '.', description: '분석할 상대 디렉터리 경로임' },
+    },
+    enabled: enableWorkspaceHttp,
+  },
+];
+
+// 3. 표준 Streamable HTTP MCP 서버 및 트랜스포트 구성
+const httpTransport = new WebStandardStreamableHTTPServerTransport({
+  sessionIdGenerator: () => randomUUID(),
+});
+
+const httpMcpServer = new McpServer({
+  name: 'mcp-platform-http-gateway',
+  version: '0.1.0',
+});
+
+// 워크스페이스 도구가 명시적으로 활성화된 경우에만 MCP 서버에 등록함
+if (enableWorkspaceHttp) {
+  httpMcpServer.registerTool(
+    'workspace_status',
+    {
+      description: '설정된 워크스페이스 루트의 기본 정보를 반환함 (읽기 전용임)',
+      annotations: { readOnlyHint: true, idempotentHint: true },
+    },
+    async () => {
+      const res = await handleWorkspaceToolCall('workspace_status', {});
+      return { content: [{ type: 'text', text: JSON.stringify(res, null, 2) }] };
+    },
+  );
+
+  httpMcpServer.registerTool(
+    'list_project_files',
+    {
+      description: '워크스페이스 상대 디렉터리의 가시 파일 목록을 반환함 (읽기 전용임)',
+      inputSchema: {
+        path: z.string().optional().describe('상대 디렉터리 경로임'),
+        maxDepth: z.number().optional().describe('최대 탐색 깊이임'),
+      },
+      annotations: { readOnlyHint: true, idempotentHint: true },
+    },
+    async (args) => {
+      const res = await handleWorkspaceToolCall('list_project_files', args);
+      return { content: [{ type: 'text', text: JSON.stringify(res, null, 2) }] };
+    },
+  );
+
+  httpMcpServer.registerTool(
+    'read_project_file',
+    {
+      description: '워크스페이스 상대경로의 텍스트 파일 내용을 읽음 (최대 256KB 제한함)',
+      inputSchema: {
+        path: z.string().describe('상대 파일 경로임'),
+      },
+      annotations: { readOnlyHint: true, idempotentHint: true },
+    },
+    async (args) => {
+      const res = await handleWorkspaceToolCall('read_project_file', args);
+      return { content: [{ type: 'text', text: JSON.stringify(res, null, 2) }] };
+    },
+  );
+
+  httpMcpServer.registerTool(
+    'grep_workspace_files',
+    {
+      description: '워크스페이스 내 텍스트 파일에서 문자열 또는 정규표현식 일치 항목을 검색함',
+      inputSchema: {
+        pattern: z.string().describe('검색할 문자열 또는 정규표현식임'),
+        path: z.string().optional().describe('검색 경로임'),
+        maxMatches: z.number().optional().describe('최대 일치 건수임'),
+      },
+      annotations: { readOnlyHint: true, idempotentHint: true },
+    },
+    async (args) => {
+      const res = await handleWorkspaceToolCall('grep_workspace_files', args);
+      return { content: [{ type: 'text', text: JSON.stringify(res, null, 2) }] };
+    },
+  );
+
+  httpMcpServer.registerTool(
+    'workspace_project_summary',
+    {
+      description: '워크스페이스 내 가시 파일들의 확장자별 분포 및 요약 통계를 산출함',
+      inputSchema: {
+        path: z.string().optional().describe('분석할 상대 디렉터리 경로임'),
+      },
+      annotations: { readOnlyHint: true, idempotentHint: true },
+    },
+    async (args) => {
+      const res = await handleWorkspaceToolCall('workspace_project_summary', args);
+      return { content: [{ type: 'text', text: JSON.stringify(res, null, 2) }] };
+    },
+  );
+}
+
+// 플랫폼 공통 상태 확인 도구 등록
+httpMcpServer.registerTool(
+  'platform_status',
+  {
+    description: 'mcp-platform HTTP 게이트웨이의 가동 상태 및 보안 설정 요약을 반환함',
+    annotations: { readOnlyHint: true, idempotentHint: true },
+  },
+  async () => ({
+    content: [
+      {
+        type: 'text',
+        text: JSON.stringify(
+          {
+            service: 'mcp-platform-http-gateway',
+            version: '0.1.0',
+            workspace_files_enabled: enableWorkspaceHttp,
+            uptime_seconds: process.uptime(),
+          },
+          null,
+          2,
+        ),
+      },
+    ],
+  }),
+);
+
+// MCP 서버와 HTTP 트랜스포트 바인딩 완료
+await httpMcpServer.connect(httpTransport);
+
+// 4. HTTP 요청 디스패처 및 보안 미들웨어
 const server = http.createServer(async (req, res) => {
-  // CORS 헤더 설정
-  res.setHeader('Access-Control-Allow-Origin', '*');
-  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Requested-With');
+  req.setTimeout(REQUEST_TIMEOUT_MS, () => {
+    if (!res.headersSent) {
+      res.writeHead(408, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: '요청 처리 시간 초과됨 (30초 제한)' }));
+    }
+  });
+
+  // Host 헤더 유효성 검증
+  const hostValidation = validateHostHeader(req.headers.host, allowedHostnames);
+  if (!hostValidation.ok) {
+    res.writeHead(403, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ error: hostValidation.message }));
+    return;
+  }
+
+  // Origin 헤더 유효성 검증 (제공된 경우)
+  const originHeader = req.headers.origin;
+  if (originHeader) {
+    const originValidation = validateOriginHeader(originHeader, allowedOriginHostnames);
+    if (!originValidation.ok) {
+      res.writeHead(403, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: originValidation.message }));
+      return;
+    }
+    res.setHeader('Access-Control-Allow-Origin', originHeader);
+    res.setHeader('Vary', 'Origin');
+  }
+
+  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, DELETE, OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, Accept, X-Requested-With');
 
   if (req.method === 'OPTIONS') {
     res.writeHead(204);
@@ -273,13 +490,112 @@ const server = http.createServer(async (req, res) => {
   const url = new URL(req.url ?? '/', `http://${req.headers.host ?? 'localhost'}`);
   const pathname = url.pathname;
 
-  if (req.method === 'GET' && (pathname === '/health' || pathname === '/healthz')) {
-    res.writeHead(200, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({ status: 'ok', service: 'mcp-platform', port: PORT, uptime: process.uptime() }));
+  // Bearer 토큰 검증 헬퍼 함수
+  const isAuthenticated = (): boolean => {
+    if (!bearerToken) return true;
+    const auth = req.headers.authorization;
+    if (!auth) return false;
+    const [scheme, token] = auth.split(' ');
+    return scheme?.toLowerCase() === 'bearer' && token === bearerToken;
+  };
+
+  // -------------------------------------------------------------------------
+  // 4.1 표준 MCP Streamable HTTP 전송 엔드포인트 (/mcp)
+  // -------------------------------------------------------------------------
+  if (pathname === '/mcp') {
+    if (bearerToken && !isAuthenticated()) {
+      res.writeHead(401, { 'Content-Type': 'application/json' });
+      res.end(
+        JSON.stringify({
+          jsonrpc: '2.0',
+          error: { code: -32001, message: 'Unauthorized: MCP_HTTP_BEARER_TOKEN이 일치하지 않음' },
+          id: null,
+        }),
+      );
+      return;
+    }
+
+    const chunks: Buffer[] = [];
+    let totalBytes = 0;
+    let bodyTooLarge = false;
+
+    for await (const chunk of req) {
+      totalBytes += (chunk as Buffer).length;
+      if (totalBytes > MAX_BODY_BYTES) {
+        bodyTooLarge = true;
+        break;
+      }
+      chunks.push(chunk as Buffer);
+    }
+
+    if (bodyTooLarge) {
+      res.writeHead(413, { 'Content-Type': 'application/json' });
+      res.end(
+        JSON.stringify({
+          jsonrpc: '2.0',
+          error: { code: -32000, message: 'Payload Too Large: 요청 본문이 1MB 제한을 초과함' },
+          id: null,
+        }),
+      );
+      return;
+    }
+
+    const bodyBuffer = chunks.length > 0 ? Buffer.concat(chunks) : undefined;
+    const headers = new Headers();
+    for (const [key, val] of Object.entries(req.headers)) {
+      if (Array.isArray(val)) {
+        val.forEach((v) => headers.append(key, v));
+      } else if (val !== undefined) {
+        headers.set(key, val);
+      }
+    }
+
+    const webReq = new Request(url, {
+      method: req.method,
+      headers,
+      body:
+        req.method !== 'GET' && req.method !== 'HEAD' && bodyBuffer && bodyBuffer.length > 0
+          ? bodyBuffer
+          : undefined,
+      duplex: 'half',
+    } as any);
+
+    const webRes = await httpTransport.handleRequest(webReq);
+    res.writeHead(webRes.status, Object.fromEntries(webRes.headers.entries()));
+    if (webRes.body) {
+      const reader = webRes.body.getReader();
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        res.write(value);
+      }
+    }
+    res.end();
     return;
   }
 
-  if (req.method === 'GET' && pathname === '/servers') {
+  // -------------------------------------------------------------------------
+  // 4.2 REST 관리 API 엔드포인트 (/api/* 및 호환성 경로)
+  // -------------------------------------------------------------------------
+
+  // 헬스체크
+  if (req.method === 'GET' && (pathname === '/api/health' || pathname === '/api/healthz' || pathname === '/health' || pathname === '/healthz')) {
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(
+      JSON.stringify({
+        status: 'ok',
+        service: 'mcp-platform',
+        host: HOST,
+        port: PORT,
+        uptime: process.uptime(),
+        workspace_tools_enabled: enableWorkspaceHttp,
+      }),
+    );
+    return;
+  }
+
+  // 등록 서버 목록 조회
+  if (req.method === 'GET' && (pathname === '/api/servers' || pathname === '/servers')) {
     const cliScript = path.resolve(projectRoot, 'scripts/mcp-cli.sh');
     try {
       const { stdout } = await execFileAsync(cliScript, ['servers']);
@@ -293,7 +609,8 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
-  if (req.method === 'GET' && pathname === '/cache/stats') {
+  // 캐시 통계 조회
+  if (req.method === 'GET' && (pathname === '/api/cache/stats' || pathname === '/cache/stats')) {
     const cliScript = path.resolve(projectRoot, 'scripts/mcp-cli.sh');
     try {
       const { stdout } = await execFileAsync(cliScript, ['cache', 'stats']);
@@ -307,7 +624,31 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
-  if (req.method === 'POST' && pathname === '/cache/clear') {
+  // 관리자 전용 영속 캐시 초기화 (원격 기본 비활성화, 인증 필수임)
+  if (req.method === 'POST' && (pathname === '/api/admin/cache/clear' || pathname === '/cache/clear')) {
+    const isLocalCall = isLoopbackAddress(req.socket.remoteAddress ?? '');
+    const authHeader = req.headers.authorization;
+    const isAuthorizedAdmin =
+      Boolean(adminToken && authHeader === `Bearer ${adminToken}`) ||
+      Boolean(!adminToken && isLocalCall && isAuthenticated());
+
+    if (pathname === '/cache/clear' && !isAuthorizedAdmin) {
+      res.writeHead(403, { 'Content-Type': 'application/json' });
+      res.end(
+        JSON.stringify({
+          success: false,
+          error: '원격 /cache/clear 작업은 보안상 비활성화됨. 인증된 /api/admin/cache/clear 경로를 사용해야 함',
+        }),
+      );
+      return;
+    }
+
+    if (!isAuthorizedAdmin) {
+      res.writeHead(401, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ success: false, error: '관리자 인증 토큰이 필요함' }));
+      return;
+    }
+
     const cliScript = path.resolve(projectRoot, 'scripts/mcp-cli.sh');
     try {
       const { stdout } = await execFileAsync(cliScript, ['cache', 'clear']);
@@ -321,7 +662,8 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
-  if (req.method === 'GET' && pathname === '/doctor') {
+  // 시스템 종합 진단 리포트
+  if (req.method === 'GET' && (pathname === '/api/doctor' || pathname === '/doctor')) {
     const doctorScript = path.resolve(projectRoot, 'scripts/doctor.sh');
     try {
       const { stdout } = await execFileAsync(doctorScript, []);
@@ -334,53 +676,68 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
-  if (req.method === 'GET' && pathname === '/openapi.json') {
+  // OpenAPI 3.0 명세
+  if (req.method === 'GET' && (pathname === '/api/openapi.json' || pathname === '/openapi.json')) {
     res.writeHead(200, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({
-      openapi: '3.0.0',
-      info: { title: 'MCP Platform HTTP Gateway', version: '0.1.0' },
-      paths: {
-        '/mcp/tools': { get: { summary: '등록 도구 목록 조회', responses: { '200': { description: '성공' } } } },
-        '/call': {
-          post: {
-            summary: '도구 호출 실행',
-            requestBody: {
-              content: {
-                'application/json': {
-                  schema: {
-                    type: 'object',
-                    required: ['tool'],
-                    properties: { tool: { type: 'string' }, arguments: { type: 'object' } },
-                  },
-                },
-              },
+    res.end(
+      JSON.stringify(
+        {
+          openapi: '3.0.0',
+          info: {
+            title: 'MCP Platform HTTP & REST Gateway',
+            version: '0.1.0',
+            description: 'MCP Streamable HTTP(/mcp) 및 시스템 관리 REST API(/api/*)',
+          },
+          paths: {
+            '/mcp': {
+              post: { summary: '표준 MCP Streamable HTTP JSON-RPC 전송 엔드포인트' },
+              get: { summary: '표준 MCP SSE 이벤트 스트림 핸드셰이크' },
+              delete: { summary: '표준 MCP 세션 종료' },
             },
-            responses: { '200': { description: '실행 성공' } },
+            '/api/health': { get: { summary: '서비스 가동 상태 확인' } },
+            '/api/servers': { get: { summary: '등록된 MCP 서버 목록 조회' } },
+            '/api/tools': { get: { summary: 'HTTP 게이트웨이 도구 명세 조회' } },
+            '/api/cache/stats': { get: { summary: '2계층 영속 캐시 적재 통계 조회' } },
+            '/api/admin/cache/clear': { post: { summary: '관리자 전용 영속 캐시 즉시 초기화' } },
+            '/api/doctor': { get: { summary: '시스템 종합 진단 텍스트 리포트' } },
           },
         },
-      },
-    }, null, 2));
+        null,
+        2,
+      ),
+    );
     return;
   }
 
-  if (req.method === 'GET' && (pathname === '/' || pathname === '/mcp' || pathname === '/mcp/tools' || pathname === '/tools')) {
+  // 도구 명세 목록 조회
+  if (req.method === 'GET' && (pathname === '/' || pathname === '/api/tools' || pathname === '/tools')) {
     res.writeHead(200, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({
-      service: 'mcp-platform-http-gateway',
-      version: '0.1.0',
-      workspace_root: workspaceRoot,
-      tools: TOOLS,
-    }, null, 2));
+    res.end(
+      JSON.stringify(
+        {
+          service: 'mcp-platform-http-gateway',
+          version: '0.1.0',
+          mcp_endpoint: '/mcp',
+          workspace_files_enabled: enableWorkspaceHttp,
+          tools: WORKSPACE_TOOLS_DEFINITION,
+        },
+        null,
+        2,
+      ),
+    );
     return;
   }
 
-  if (req.method === 'GET' && (pathname === '/mcp/events' || pathname === '/events')) {
+  // 하트비트 SSE 스트림 (기존 /mcp/events 대신 분리된 경로)
+  if (req.method === 'GET' && (pathname === '/api/heartbeat-stream' || pathname === '/heartbeat')) {
     res.writeHead(200, {
       'Content-Type': 'text/event-stream',
       'Cache-Control': 'no-cache',
       'Connection': 'keep-alive',
     });
-    res.write(`data: ${JSON.stringify({ event: 'connected', service: 'mcp-platform-http-gateway', timestamp: new Date().toISOString() })}\n\n`);
+    res.write(
+      `data: ${JSON.stringify({ event: 'connected', service: 'mcp-platform-http-gateway', timestamp: new Date().toISOString() })}\n\n`,
+    );
 
     const intervalId = setInterval(() => {
       res.write(`: ping ${Date.now()}\n\n`);
@@ -392,56 +749,24 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
-  if (req.method === 'POST' && (pathname === '/call' || pathname === '/mcp/call' || pathname === '/mcp')) {
-    let body = '';
-    req.on('data', (chunk) => { body += chunk; });
-    req.on('end', async () => {
-      try {
-        const payload = JSON.parse(body || '{}');
-
-        // JSON-RPC 2.0 지원 호환성 처리
-        let toolName = payload.tool || payload.name;
-        let toolArgs = payload.arguments || payload.args || {};
-        let requestId = payload.id;
-
-        if (payload.method === 'tools/call' && payload.params) {
-          toolName = payload.params.name;
-          toolArgs = payload.params.arguments || {};
-        }
-
-        if (!toolName) {
-          res.writeHead(400, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({
-            jsonrpc: requestId ? '2.0' : undefined,
-            id: requestId,
-            error: { code: -32600, message: '요청 본문에 tool 또는 name 항목이 누락됨' },
-          }));
-          return;
-        }
-
-        const result = await handleToolCall(toolName, toolArgs);
-        res.writeHead(200, { 'Content-Type': 'application/json' });
-        if (requestId !== undefined) {
-          res.end(JSON.stringify({
-            jsonrpc: '2.0',
-            id: requestId,
-            result: { content: [{ type: 'text', text: typeof result === 'string' ? result : JSON.stringify(result) }] },
-          }));
-        } else {
-          res.end(JSON.stringify({ success: true, tool: toolName, result }));
-        }
-      } catch (err: any) {
-        res.writeHead(400, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ success: false, error: err.message || String(err) }));
-      }
-    });
+  // 폐기된 /mcp/events 접근 처리
+  if (pathname === '/mcp/events') {
+    res.writeHead(410, { 'Content-Type': 'application/json' });
+    res.end(
+      JSON.stringify({
+        error: '/mcp/events 경로는 폐기됨. 표준 MCP 전송은 /mcp를 사용하고 단순 핑은 /api/heartbeat-stream을 사용해야 함',
+      }),
+    );
     return;
   }
 
+  // 404 미지원 경로
   res.writeHead(404, { 'Content-Type': 'application/json' });
   res.end(JSON.stringify({ error: 'Not Found', path: pathname }));
 });
 
-server.listen(PORT, '0.0.0.0', () => {
-  console.log(`[mcp-platform] HTTP 게이트웨이가 http://0.0.0.0:${PORT} 에서 대기 중임`);
+server.listen(PORT, HOST, () => {
+  console.log(`[mcp-platform] HTTP 게이트웨이가 http://${HOST}:${PORT} 에서 대기 중임`);
+  console.log(`[mcp-platform] MCP 표준 엔드포인트: http://${HOST}:${PORT}/mcp`);
+  console.log(`[mcp-platform] REST 관리 엔드포인트: http://${HOST}:${PORT}/api/health`);
 });
