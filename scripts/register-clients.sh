@@ -53,7 +53,15 @@ mkdir -p "$VSCODE_DIR"
 render_template "$MCP_ROOT/config/clients/vscode_mcp.json" > "$VSCODE_DIR/mcp.json"
 echo "[OK] VS Code 작업 공간 설정 갱신 완료: $VSCODE_DIR/mcp.json"
 
-# 4. 런타임 빌드 상태 검증
+# 4. internal-portal 프로젝트 작업 공간 설정 (.vscode/mcp.json) 갱신
+PORTAL_DIR="$WORKSPACE_ROOT/internal-portal/.vscode"
+if [[ -d "$(dirname "$PORTAL_DIR")" ]]; then
+  mkdir -p "$PORTAL_DIR"
+  render_template "$MCP_ROOT/config/clients/vscode_mcp.json" > "$PORTAL_DIR/mcp.json"
+  echo "[OK] internal-portal MCP 설정 갱신 완료: $PORTAL_DIR/mcp.json"
+fi
+
+# 5. 런타임 빌드 상태 검증
 echo "--- TypeScript 게이트웨이 빌드 검증 ---"
 (cd "$MCP_ROOT" && npm run build)
 

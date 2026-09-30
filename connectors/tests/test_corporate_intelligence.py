@@ -62,10 +62,18 @@ def test_analyze_company_comprehensive_success(monkeypatch):
             "chunks": [{"document_name": "테스트사_업무협약서_2025.pdf"}],
         }
 
+    async def fake_dart(**kwargs):
+        return {
+            "success": True,
+            "total_count": 1,
+            "items": [{"report_nm": "사업보고서", "rcept_dt": "20260330", "flr_nm": "주식회사 테스트"}],
+        }
+
     monkeypatch.setattr(corporate_intelligence.nts, "check_business_status", fake_nts)
     monkeypatch.setattr(corporate_intelligence.nps, "search_business", fake_nps)
     monkeypatch.setattr(corporate_intelligence.fsc, "get_summary_financial_statement", fake_fsc)
     monkeypatch.setattr(corporate_intelligence.rag, "rag_search_documents", fake_rag)
+    monkeypatch.setattr(corporate_intelligence.dart, "search_dart_filings", fake_dart)
 
     result = run_async(corporate_intelligence.analyze_company_comprehensive(
         business_number="123-45-67890",
@@ -78,4 +86,5 @@ def test_analyze_company_comprehensive_success(monkeypatch):
     assert result["pension_employment"]["employee_count"] == 150
     assert result["financial_summary"]["revenue"] == 50000000000
     assert result["internal_rag_history"]["total_matches"] == 1
+    assert result["dart_filings"]["total_recent"] == 1
     assert "양호" in result["overall_grade"]

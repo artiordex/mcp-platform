@@ -72,6 +72,12 @@ if [[ -x "$VENV_PYTHON" ]]; then
   else
     report_fail "핵심 Python 패키지 누락됨"
   fi
+
+  if "$VENV_PYTHON" -c "from mcp_platform.servers import rag, pps, nts, nps, fsc, food_safety, portal_catalog, corporate_intelligence, dart, address" >/dev/null 2>&1; then
+    report_ok "전체 10개 FastMCP 커넥터 모듈 로드 정상임"
+  else
+    report_fail "일부 FastMCP 커넥터 모듈 로드 실패함"
+  fi
 else
   report_fail "Python 가상환경($VENV_PYTHON)을 찾을 수 없음"
 fi

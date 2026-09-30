@@ -310,23 +310,62 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
-  if (req.method === 'POST' && (pathname === '/call' || pathname === '/mcp/call')) {
+  if (req.method === 'GET' && (pathname === '/mcp/events' || pathname === '/events')) {
+    res.writeHead(200, {
+      'Content-Type': 'text/event-stream',
+      'Cache-Control': 'no-cache',
+      'Connection': 'keep-alive',
+    });
+    res.write(`data: ${JSON.stringify({ event: 'connected', service: 'mcp-platform-http-gateway', timestamp: new Date().toISOString() })}\n\n`);
+
+    const intervalId = setInterval(() => {
+      res.write(`: ping ${Date.now()}\n\n`);
+    }, 15000);
+
+    req.on('close', () => {
+      clearInterval(intervalId);
+    });
+    return;
+  }
+
+  if (req.method === 'POST' && (pathname === '/call' || pathname === '/mcp/call' || pathname === '/mcp')) {
     let body = '';
     req.on('data', (chunk) => { body += chunk; });
     req.on('end', async () => {
       try {
         const payload = JSON.parse(body || '{}');
-        const toolName = payload.tool || payload.name;
-        const toolArgs = payload.arguments || payload.args || {};
+
+        // JSON-RPC 2.0 지원 호환성 처리
+        let toolName = payload.tool || payload.name;
+        let toolArgs = payload.arguments || payload.args || {};
+        let requestId = payload.id;
+
+        if (payload.method === 'tools/call' && payload.params) {
+          toolName = payload.params.name;
+          toolArgs = payload.params.arguments || {};
+        }
+
         if (!toolName) {
           res.writeHead(400, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ error: '요청 본문에 tool 또는 name 항목이 누락됨' }));
+          res.end(JSON.stringify({
+            jsonrpc: requestId ? '2.0' : undefined,
+            id: requestId,
+            error: { code: -32600, message: '요청 본문에 tool 또는 name 항목이 누락됨' },
+          }));
           return;
         }
 
         const result = await handleToolCall(toolName, toolArgs);
         res.writeHead(200, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ success: true, tool: toolName, result }));
+        if (requestId !== undefined) {
+          res.end(JSON.stringify({
+            jsonrpc: '2.0',
+            id: requestId,
+            result: { content: [{ type: 'text', text: typeof result === 'string' ? result : JSON.stringify(result) }] },
+          }));
+        } else {
+          res.end(JSON.stringify({ success: true, tool: toolName, result }));
+        }
       } catch (err: any) {
         res.writeHead(400, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ success: false, error: err.message || String(err) }));

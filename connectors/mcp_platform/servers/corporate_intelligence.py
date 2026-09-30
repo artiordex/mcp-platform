@@ -18,7 +18,7 @@ from mcp.server.fastmcp import FastMCP
 
 from ..core.cache import api_cache
 from ..core.common import error_result
-from . import fsc, nps, nts, rag
+from . import dart, fsc, nps, nts, rag
 
 mcp = FastMCP("Corporate Intelligence Hub")
 
@@ -74,14 +74,14 @@ async def analyze_company_comprehensive(
         tasks.append(("nts", asyncio.sleep(0, result=None)))
 
     # 2. 국민연금 사업장 고용 및 급여 추정
-    if search_name:
-        tasks.append(("nps", nps.search_business(company_name=search_name, page_no=1, num_of_rows=5)))
+    if search_name or clean_biz_no:
+        tasks.append(("nps", nps.search_business(wkpl_nm=search_name or None, bzowr_rgst_no=clean_biz_no or None, page_no=1, num_of_rows=5)))
     else:
         tasks.append(("nps", asyncio.sleep(0, result=None)))
 
     # 3. 금융위 요약 재무제표 조회
     if clean_biz_no:
-        tasks.append(("fsc", fsc.get_summary_financial_statement(business_number=clean_biz_no)))
+        tasks.append(("fsc", fsc.get_summary_financial_statement(crno=clean_biz_no)))
     else:
         tasks.append(("fsc", asyncio.sleep(0, result=None)))
 
@@ -91,6 +91,12 @@ async def analyze_company_comprehensive(
         tasks.append(("rag", rag.rag_search_documents(query=f"{rag_query} 계약 실적 협약", top_k=3)))
     else:
         tasks.append(("rag", asyncio.sleep(0, result=None)))
+
+    # 5. 금융감독원 OpenDART 공시 보고서 검색
+    if search_name:
+        tasks.append(("dart", dart.search_dart_filings(corp_name=search_name, page_count=5)))
+    else:
+        tasks.append(("dart", asyncio.sleep(0, result=None)))
 
     # 병렬 비동기 조회
     task_keys = [t[0] for t in tasks]
@@ -137,6 +143,17 @@ async def analyze_company_comprehensive(
             "debt_ratio": d.get("debt_ratio"),
         }
 
+    # DART 최근 공시 내역
+    dart_data = gathered.get("dart")
+    if dart_data and isinstance(dart_data, dict) and dart_data.get("items"):
+        result["dart_filings"] = {
+            "total_recent": dart_data.get("total_count", 0),
+            "recent_reports": [
+                f"[{it.get('rcept_dt')}] {it.get('report_nm')} ({it.get('flr_nm')})"
+                for it in dart_data.get("items", [])[:3]
+            ],
+        }
+
     # 사내 RAG 연관 이력
     rag_data = gathered.get("rag")
     if rag_data and isinstance(rag_data, dict):
@@ -146,7 +163,7 @@ async def analyze_company_comprehensive(
         }
 
     # 종합 등급 판정 로직
-    is_active = result.get("tax_status", {}).get("is_active", True)
+    is_active = (result.get("tax_status") or {}).get("is_active", True)
     has_finance = result.get("financial_summary") is not None
     if not is_active:
         result["overall_grade"] = "주의 (휴폐업 사업자)"

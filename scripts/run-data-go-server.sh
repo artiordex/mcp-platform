@@ -31,6 +31,12 @@ case "$server_name" in
   corporate-intelligence)
     python_module="mcp_platform.servers.corporate_intelligence"
     ;;
+  dart-filings)
+    python_module="mcp_platform.servers.dart"
+    ;;
+  address-lookup)
+    python_module="mcp_platform.servers.address"
+    ;;
   *)
     cat >&2 <<'USAGE'
 Usage: run-data-go-server.sh <server>
@@ -44,6 +50,8 @@ Servers:
   food-safety-korea
   internal-rag
   corporate-intelligence
+  dart-filings
+  address-lookup
 USAGE
     exit 2
     ;;
