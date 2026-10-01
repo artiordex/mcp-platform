@@ -14,10 +14,7 @@ import { fromJsonSchema, McpServer } from '@modelcontextprotocol/server';
 import { serveStdio } from '@modelcontextprotocol/server/stdio';
 import * as z from 'zod/v4';
 
-import {
-  ChildMcpClient,
-  describeError,
-} from '../clients/child-mcp-client.js';
+import { ChildMcpClient } from '../clients/child-mcp-client.js';
 import { namespacedToolName } from './tool-name.js';
 import { isWriteTool, type ServerStatusRecord } from './mcp-gateway.js';
 
@@ -29,6 +26,7 @@ type DataGoServerDefinition = {
   label: string;
   launcher: string;
   envPassthrough: string[];
+  readOnlyTools: string[];
   allowWriteTools?: boolean;
 };
 
@@ -85,72 +83,104 @@ const serverDefinitions: DataGoServerDefinition[] = [
     label: 'Corporate Intelligence Hub',
     launcher: 'run-corporate-intelligence.sh',
     envPassthrough: publicDataEnvironment,
+    readOnlyTools: ['analyze_company_comprehensive'],
   },
   {
     id: 'rag',
     label: 'Internal RAG-vLLM Knowledge Hub',
     launcher: 'run-internal-rag.sh',
     envPassthrough: publicDataEnvironment,
+    readOnlyTools: [
+      'rag_search_documents',
+      'rag_ask_ai',
+      'rag_list_documents',
+      'rag_get_document_detail',
+    ],
   },
   {
     id: 'pps',
     label: 'PPS Narajangteo',
     launcher: 'run-data-go-pps.sh',
     envPassthrough: publicDataEnvironment,
+    readOnlyTools: [
+      'search_bid_announcements',
+      'search_successful_bids',
+      'search_contracts',
+      'get_bid_detail',
+      'search_order_plans',
+    ],
   },
   {
     id: 'nps',
     label: 'NPS Business Enrollment',
     launcher: 'run-data-go-nps.sh',
     envPassthrough: publicDataEnvironment,
+    readOnlyTools: ['search_business', 'get_business_detail', 'get_period_status'],
   },
   {
     id: 'nts',
     label: 'NTS Business Verification',
     launcher: 'run-data-go-nts.sh',
     envPassthrough: publicDataEnvironment,
+    readOnlyTools: ['validate_business', 'check_business_status', 'batch_validate_businesses'],
   },
   {
     id: 'fsc',
     label: 'FSC Financial Information',
     launcher: 'run-data-go-fsc.sh',
     envPassthrough: publicDataEnvironment,
+    readOnlyTools: [
+      'get_summary_financial_statement',
+      'get_balance_sheet',
+      'get_income_statement',
+      'search_company_financial_info',
+    ],
   },
   {
     id: 'public_data_catalog',
     label: 'Public Data Portal Catalog',
     launcher: 'run-data-go-catalog.sh',
     envPassthrough: publicDataEnvironment,
+    readOnlyTools: ['search_public_datasets'],
   },
   {
     id: 'food_safety',
     label: 'Food Safety Korea',
     launcher: 'run-data-go-food-safety.sh',
     envPassthrough: foodSafetyEnvironment,
+    readOnlyTools: [
+      'search_food_products',
+      'search_food_manufacturing_reports',
+      'search_recalled_foods',
+    ],
   },
   {
     id: 'dart',
     label: 'OpenDART Corporate Disclosures',
     launcher: 'run-dart-filings.sh',
     envPassthrough: publicDataEnvironment,
+    readOnlyTools: ['search_dart_filings', 'get_company_overview'],
   },
   {
     id: 'address',
     label: 'Address and District Lookup',
     launcher: 'run-address-lookup.sh',
     envPassthrough: publicDataEnvironment,
+    readOnlyTools: ['search_address', 'get_administrative_district'],
   },
   {
     id: 'smes',
     label: 'SMES Support Programs',
     launcher: 'run-smes-programs.sh',
     envPassthrough: publicDataEnvironment,
+    readOnlyTools: ['search_support_programs', 'get_support_program_detail'],
   },
   {
     id: 'kipris',
     label: 'KIPRIS Patent and Utility Model',
     launcher: 'run-kipris-patents.sh',
     envPassthrough: publicDataEnvironment,
+    readOnlyTools: ['search_patents', 'get_patent_detail'],
   },
 ];
 
@@ -214,13 +244,16 @@ async function createGateway(clients: ChildMcpClient[]): Promise<McpServer> {
     try {
       await client.initialize();
       const allowWrite = definition.allowWriteTools || globalAllowWrite;
+      const readOnlyTools = new Set(definition.readOnlyTools);
 
       // 1. 도구(Tools) 등록
       const tools = await client.listTools();
+      const resources = await client.listResources();
+      const prompts = await client.listPrompts();
       let registeredToolsCount = 0;
 
       for (const tool of tools) {
-        const isWrite = isWriteTool(tool.name, tool.annotations);
+        const isWrite = isWriteTool(tool.name, tool.annotations, readOnlyTools);
         if (isWrite && !allowWrite) {
           process.stderr.write(
             `[data-go] ${definition.id}: 쓰기 도구(${tool.name})는 비활성화 기본값에 따라 제외됨\n`,
@@ -248,8 +281,8 @@ async function createGateway(clients: ChildMcpClient[]): Promise<McpServer> {
             annotations: {
               audience: ['user', 'assistant'],
               priority: 0.5,
-              readOnlyHint: !isWrite,
               ...(tool.annotations ?? {}),
+              readOnlyHint: !isWrite,
             },
           },
           async (args) => {
@@ -263,7 +296,6 @@ async function createGateway(clients: ChildMcpClient[]): Promise<McpServer> {
       }
 
       // 2. 리소스(Resources) 등록
-      const resources = await client.listResources();
       let registeredResourcesCount = 0;
       for (const resource of resources) {
         const namespacedUri = `data_go://${definition.id}/${resource.uri.replace('://', '/')}`;
@@ -285,7 +317,6 @@ async function createGateway(clients: ChildMcpClient[]): Promise<McpServer> {
       }
 
       // 3. 프롬프트(Prompts) 등록
-      const prompts = await client.listPrompts();
       let registeredPromptsCount = 0;
       for (const prompt of prompts) {
         const namespacedName = namespacedToolName('data_go', definition.id, prompt.name);
@@ -332,7 +363,7 @@ async function createGateway(clients: ChildMcpClient[]): Promise<McpServer> {
       );
     } catch (error) {
       await client.close();
-      const errorMessage = describeError(error);
+      const errorMessage = client.safeErrorMessage(error);
       serverStatuses.push({
         id: definition.id,
         label: definition.label,

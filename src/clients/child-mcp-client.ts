@@ -137,6 +137,7 @@ export class ChildMcpClient {
   private readonly secrets: string[] = [];
   private closed = false;
   private closing: Promise<void> | undefined;
+  private reconnecting: Promise<boolean> | undefined;
   private _status: ChildClientStatus = 'uninitialized';
   private _lastError: string | undefined;
   private _reconnectAttempts = 0;
@@ -173,6 +174,16 @@ export class ChildMcpClient {
 
   get lastConnectedAt(): Date | undefined {
     return this._lastConnectedAt;
+  }
+
+  safeErrorMessage(error: unknown): string {
+    return redactSecrets(describeError(error) || String(error), this.secrets);
+  }
+
+  private safeError(error: unknown): Error {
+    const safe = new Error(this.safeErrorMessage(error));
+    if (error instanceof Error) safe.name = error.name;
+    return safe;
   }
 
   /**
@@ -221,11 +232,17 @@ export class ChildMcpClient {
     }
 
     this.transport.onerror = (error) => {
-      this._lastError = error.message;
+      this._lastError = this.safeErrorMessage(error);
       this._status = 'error';
       process.stderr.write(
-        `[mcp-platform:${this.serverId}] ${redactSecrets(error.message, this.secrets)}\n`,
+        `[mcp-platform:${this.serverId}] ${this._lastError}\n`,
       );
+    };
+    this.transport.onclose = () => {
+      if (!this.closed) {
+        this._status = 'error';
+        this._lastError ??= '하위 MCP 서버 연결이 예기치 않게 종료됨';
+      }
     };
   }
 
@@ -246,14 +263,20 @@ export class ChildMcpClient {
 
     try {
       await this.client.connect(this.transport, { timeout: this.requestTimeoutMs });
+      if (this.closed) {
+        await this.client.close();
+        throw new Error(`연결 중 종료 요청을 받은 서버(${this.serverId})임`);
+      }
       this._status = 'ready';
       this._lastError = undefined;
       this._lastConnectedAt = new Date();
       this._reconnectAttempts = 0;
     } catch (error) {
-      this._status = 'error';
-      this._lastError = describeError(error);
-      throw error;
+      if (!this.closed) {
+        this._status = 'error';
+        this._lastError = this.safeErrorMessage(error);
+      }
+      throw this.safeError(error);
     }
   }
 
@@ -264,10 +287,24 @@ export class ChildMcpClient {
     if (this.closed) return false;
     if (this._status === 'ready') return true;
 
+    if (this.reconnecting) return this.reconnecting;
+
+    const reconnecting = this.reconnect(maxRetries);
+    this.reconnecting = reconnecting;
+    try {
+      return await reconnecting;
+    } finally {
+      if (this.reconnecting === reconnecting) this.reconnecting = undefined;
+    }
+  }
+
+  private async reconnect(maxRetries: number): Promise<boolean> {
     for (let attempt = 1; attempt <= maxRetries; attempt++) {
+      if (this.closed) return false;
       this._reconnectAttempts++;
       const backoffMs = Math.min(200 * Math.pow(2, attempt - 1), 2000);
       await new Promise((resolve) => setTimeout(resolve, backoffMs));
+      if (this.closed) return false;
 
       try {
         // 기존 연결 정리 후 트랜스포트 재생성
@@ -280,7 +317,7 @@ export class ChildMcpClient {
         await this.initialize();
         return true;
       } catch (error) {
-        this._lastError = describeError(error);
+        this._lastError = this.safeErrorMessage(error);
       }
     }
 
@@ -292,7 +329,8 @@ export class ChildMcpClient {
    */
   async listTools(): Promise<ChildTool[]> {
     if (this._status !== 'ready') {
-      return [];
+      const connected = await this.ensureConnected();
+      if (!connected) throw new Error(`하위 서버(${this.serverId}) 재연결에 실패함`);
     }
     const capabilities = this.client.getServerCapabilities();
     if (!capabilities?.tools) {
@@ -302,17 +340,16 @@ export class ChildMcpClient {
       const result = await this.client.listTools({}, { timeout: this.requestTimeoutMs });
       return (result.tools ?? []) as ChildTool[];
     } catch (error) {
-      this._lastError = describeError(error);
-      return [];
+      this._lastError = this.safeErrorMessage(error);
+      throw this.safeError(error);
     }
   }
 
-  /**
-   * 하위 서버의 특정 도구를 인자와 함께 호출함 (장애 시 1회 재연결 및 재시도)
-   */
+  /** 하위 서버의 도구를 호출함. 응답 유실 시 중복 실행될 수 있어 자동 재시도하지 않음 */
   async callTool(toolName: string, args: unknown): Promise<CallToolResult> {
-    if (this._status !== 'ready') {
-      await this.ensureConnected();
+    if (this.closed) throw new Error(`이미 종료된 서버(${this.serverId})임`);
+    if (this._status !== 'ready' && !(await this.ensureConnected())) {
+      throw new Error(`하위 서버(${this.serverId}) 재연결에 실패함`);
     }
 
     try {
@@ -324,19 +361,8 @@ export class ChildMcpClient {
         { timeout: this.requestTimeoutMs },
       );
     } catch (error) {
-      // 연결 오류로 인한 실패 시 1회 재연결 시도 후 재시도함
-      const recovered = await this.ensureConnected(1);
-      if (recovered) {
-        return this.client.callTool(
-          {
-            name: toolName,
-            arguments: isJsonObject(args) ? args : {},
-          },
-          { timeout: this.requestTimeoutMs },
-        );
-      }
-      this._lastError = describeError(error);
-      throw error;
+      this._lastError = this.safeErrorMessage(error);
+      throw this.safeError(error);
     }
   }
 
@@ -345,10 +371,8 @@ export class ChildMcpClient {
    */
   async listResources(): Promise<ChildResource[]> {
     if (this._status !== 'ready') {
-      await this.ensureConnected();
-    }
-    if (this._status !== 'ready') {
-      return [];
+      const connected = await this.ensureConnected();
+      if (!connected) throw new Error(`하위 서버(${this.serverId}) 재연결에 실패함`);
     }
     const capabilities = this.client.getServerCapabilities();
     if (!capabilities?.resources) {
@@ -357,8 +381,9 @@ export class ChildMcpClient {
     try {
       const result = await this.client.listResources({}, { timeout: this.requestTimeoutMs });
       return (result.resources ?? []) as ChildResource[];
-    } catch {
-      return [];
+    } catch (error) {
+      this._lastError = this.safeErrorMessage(error);
+      throw this.safeError(error);
     }
   }
 
@@ -366,19 +391,25 @@ export class ChildMcpClient {
    * 하위 서버의 특정 리소스를 URI로 읽음 (장애 시 1회 재연결 및 재시도)
    */
   async readResource(uri: string): Promise<Awaited<ReturnType<Client['readResource']>>> {
-    if (this._status !== 'ready') {
-      await this.ensureConnected();
+    if (this.closed) throw new Error(`이미 종료된 서버(${this.serverId})임`);
+    if (this._status !== 'ready' && !(await this.ensureConnected())) {
+      throw new Error(`하위 서버(${this.serverId}) 재연결에 실패함`);
     }
 
     try {
       return await this.client.readResource({ uri }, { timeout: this.requestTimeoutMs });
     } catch (error) {
-      const recovered = await this.ensureConnected(1);
+      const recovered = this._status !== 'ready' && (await this.ensureConnected(1));
       if (recovered) {
-        return this.client.readResource({ uri }, { timeout: this.requestTimeoutMs });
+        try {
+          return await this.client.readResource({ uri }, { timeout: this.requestTimeoutMs });
+        } catch (retryError) {
+          this._lastError = this.safeErrorMessage(retryError);
+          throw this.safeError(retryError);
+        }
       }
-      this._lastError = describeError(error);
-      throw error;
+      this._lastError = this.safeErrorMessage(error);
+      throw this.safeError(error);
     }
   }
 
@@ -387,10 +418,8 @@ export class ChildMcpClient {
    */
   async listPrompts(): Promise<ChildPrompt[]> {
     if (this._status !== 'ready') {
-      await this.ensureConnected();
-    }
-    if (this._status !== 'ready') {
-      return [];
+      const connected = await this.ensureConnected();
+      if (!connected) throw new Error(`하위 서버(${this.serverId}) 재연결에 실패함`);
     }
     const capabilities = this.client.getServerCapabilities();
     if (!capabilities?.prompts) {
@@ -399,8 +428,9 @@ export class ChildMcpClient {
     try {
       const result = await this.client.listPrompts({}, { timeout: this.requestTimeoutMs });
       return (result.prompts ?? []) as ChildPrompt[];
-    } catch {
-      return [];
+    } catch (error) {
+      this._lastError = this.safeErrorMessage(error);
+      throw this.safeError(error);
     }
   }
 
@@ -411,8 +441,9 @@ export class ChildMcpClient {
     name: string,
     args?: Record<string, string>,
   ): Promise<Awaited<ReturnType<Client['getPrompt']>>> {
-    if (this._status !== 'ready') {
-      await this.ensureConnected();
+    if (this.closed) throw new Error(`이미 종료된 서버(${this.serverId})임`);
+    if (this._status !== 'ready' && !(await this.ensureConnected())) {
+      throw new Error(`하위 서버(${this.serverId}) 재연결에 실패함`);
     }
 
     try {
@@ -421,15 +452,20 @@ export class ChildMcpClient {
         { timeout: this.requestTimeoutMs },
       );
     } catch (error) {
-      const recovered = await this.ensureConnected(1);
+      const recovered = this._status !== 'ready' && (await this.ensureConnected(1));
       if (recovered) {
-        return this.client.getPrompt(
-          { name, arguments: args },
-          { timeout: this.requestTimeoutMs },
-        );
+        try {
+          return await this.client.getPrompt(
+            { name, arguments: args },
+            { timeout: this.requestTimeoutMs },
+          );
+        } catch (retryError) {
+          this._lastError = this.safeErrorMessage(retryError);
+          throw this.safeError(retryError);
+        }
       }
-      this._lastError = describeError(error);
-      throw error;
+      this._lastError = this.safeErrorMessage(error);
+      throw this.safeError(error);
     }
   }
 

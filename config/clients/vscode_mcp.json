@@ -1,12 +1,14 @@
 {
-  "mcpServers": {
+  "servers": {
     "mcp-platform": {
+      "type": "stdio",
       "command": "/bin/bash",
       "args": [
         "__MCP_PLATFORM_ROOT__/scripts/run-mcp-gateway.sh"
       ]
     },
     "workspace-tools": {
+      "type": "stdio",
       "command": "node",
       "args": [
         "__MCP_PLATFORM_ROOT__/dist/servers/workspace-tools.js"
@@ -14,12 +16,6 @@
       "env": {
         "MCP_WORKSPACE_ROOT": "__WORKSPACE_ROOT__"
       }
-    },
-    "data-go-portal": {
-      "command": "/bin/bash",
-      "args": [
-        "__MCP_PLATFORM_ROOT__/scripts/run-data-go-portal.sh"
-      ]
     }
   }
 }

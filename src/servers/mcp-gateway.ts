@@ -8,6 +8,7 @@
  */
 
 import { promises as fs } from 'node:fs';
+import { isIP } from 'node:net';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -23,9 +24,6 @@ import {
 } from '../clients/child-mcp-client.js';
 import { namespacedToolName } from './tool-name.js';
 
-// stdio 통신 환경에서 stdout의 JSON-RPC 프로토콜 순수성을 보장하기 위해 로그를 stderr로 우회함
-console.log = (...args: unknown[]) => console.error(...args);
-
 const projectRoot = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)),
   '../..',
@@ -37,6 +35,7 @@ const CommonServerFields = {
   enabled: z.boolean().default(true),
   allowWriteTools: z.boolean().default(false),
   enabledTools: z.array(z.string()).optional(),
+  readOnlyTools: z.array(z.string().trim().min(1).max(128)).default([]),
   disabledTools: z.array(z.string()).optional(),
   requestTimeoutMs: z.number().int().min(1_000).max(600_000).default(30_000),
 };
@@ -62,13 +61,14 @@ const StreamableHttpServerDefinitionSchema = z.object({
     .refine((value) => {
       const url = new URL(value);
       return (
-        ['http:', 'https:'].includes(url.protocol) &&
+        (url.protocol === 'https:' ||
+          (url.protocol === 'http:' && isLoopbackHostname(url.hostname))) &&
         url.username.length === 0 &&
         url.password.length === 0 &&
         url.search.length === 0 &&
         url.hash.length === 0
       );
-    }, '자격증명, 쿼리, 프래그먼트가 없는 안전한 HTTP(S) URL이어야 함'),
+    }, '원격 주소는 HTTPS여야 하며 HTTP는 루프백에만 허용함. URL 자격증명, 쿼리, 프래그먼트는 허용하지 않음'),
   headersFromEnv: z
     .record(
       z.string().regex(/^[A-Za-z0-9!#$%&'*+.^_`|~-]+$/),
@@ -90,6 +90,14 @@ const GatewayConfigSchema = z.object({
 type ServerDefinition = z.infer<typeof ServerDefinitionSchema>;
 type GatewayConfig = z.infer<typeof GatewayConfigSchema>;
 
+function isLoopbackHostname(hostname: string): boolean {
+  const normalized = hostname.replace(/^\[|\]$/g, '').toLowerCase();
+  if (normalized === 'localhost') return true;
+  const version = isIP(normalized);
+  if (version === 4) return normalized.split('.')[0] === '127';
+  return version === 6 && normalized === '::1';
+}
+
 export type ServerStatusRecord = {
   id: string;
   label: string;
@@ -98,6 +106,13 @@ export type ServerStatusRecord = {
   resources: number;
   prompts: number;
   lastError?: string;
+};
+
+export type GatewayToolSummary = {
+  name: string;
+  serverId: string;
+  label: string;
+  description: string;
 };
 
 /**
@@ -143,6 +158,15 @@ async function loadGatewayConfig(): Promise<GatewayConfig> {
       throw new Error(`중복된 서버 식별자가 존재함: ${server.id}`);
     }
     seenIds.add(server.id);
+    if (
+      server.enabled &&
+      server.transport === 'streamable-http' &&
+      server.enabledTools === undefined
+    ) {
+      throw new Error(
+        `원격 서버(${server.id})는 enabledTools 허용 목록을 명시해야 활성화할 수 있음`,
+      );
+    }
   }
 
   return config.data;
@@ -177,19 +201,18 @@ function childConfig(server: ServerDefinition): ChildMcpServerConfig {
 export function isWriteTool(
   toolName: string,
   annotations?: { readOnlyHint?: boolean; [key: string]: unknown },
+  readOnlyTools: ReadonlySet<string> = new Set(),
 ): boolean {
   if (annotations?.readOnlyHint === false) {
     return true;
   }
-  if (annotations?.readOnlyHint === true) {
-    return false;
-  }
   const writePatterns = [
-    /^(create|insert|update|delete|modify|write|clear|drop|execute|ingest|publish|send|patch)_/i,
-    /_(create|insert|update|delete|modify|write|clear|drop|execute|ingest|publish|send|patch)$/i,
-    /(ingest|clear|delete|modify|write)/i,
+    /^(create|insert|update|upsert|delete|modify|write|clear|drop|execute|ingest|publish|send|patch|submit|approve|archive|move|transfer|purchase|click|type|fill|run)_/i,
+    /_(create|insert|update|upsert|delete|modify|write|clear|drop|execute|ingest|publish|send|patch|submit|approve|archive|move|transfer|purchase|click|type|fill|run)$/i,
+    /(ingest|clear|delete|modify|write|upsert|submit|approve|transfer|purchase)/i,
   ];
-  return writePatterns.some((pattern) => pattern.test(toolName));
+  if (writePatterns.some((pattern) => pattern.test(toolName))) return true;
+  return annotations?.readOnlyHint !== true && !readOnlyTools.has(toolName);
 }
 
 type PreparedTool = {
@@ -208,10 +231,12 @@ function prepareTools(
   allowWrite: boolean,
   enabledTools?: string[],
   disabledTools?: string[],
+  readOnlyTools?: string[],
 ): PreparedTool[] {
   const localNames = new Set<string>();
   const enabledSet = enabledTools ? new Set(enabledTools) : undefined;
   const disabledSet = disabledTools ? new Set(disabledTools) : undefined;
+  const readOnlySet = new Set(readOnlyTools ?? []);
   const result: PreparedTool[] = [];
 
   for (const tool of tools) {
@@ -227,7 +252,7 @@ function prepareTools(
       continue;
     }
 
-    const isWrite = isWriteTool(tool.name, tool.annotations);
+    const isWrite = isWriteTool(tool.name, tool.annotations, readOnlySet);
     if (isWrite && !allowWrite) {
       process.stderr.write(
         `[mcp-gateway] ${serverId}: 쓰기 도구(${tool.name})는 비활성화 기본값에 따라 제외됨\n`,
@@ -255,7 +280,10 @@ function prepareTools(
 /**
  * 모든 자식 MCP 서버를 초기화하고 도구·리소스·프롬프트를 통합한 게이트웨이 인스턴스를 구축함
  */
-async function createGateway(clients: ChildMcpClient[]): Promise<McpServer> {
+export async function createGateway(
+  clients: ChildMcpClient[] = [],
+  onToolRegistered?: (tool: GatewayToolSummary) => void,
+): Promise<McpServer> {
   const config = await loadGatewayConfig();
   const gateway = new McpServer({ name: config.name, version: '0.1.0' });
   const registeredToolNames = new Set<string>();
@@ -297,12 +325,15 @@ async function createGateway(clients: ChildMcpClient[]): Promise<McpServer> {
 
       // 1. 도구(Tools) 전달 등록
       const tools = await client.listTools();
+      const resources = await client.listResources();
+      const prompts = await client.listPrompts();
       const preparedTools = prepareTools(
         definition.id,
         tools,
         allowWrite,
         definition.enabledTools,
         definition.disabledTools,
+        definition.readOnlyTools,
       );
 
       for (const { exposedName } of preparedTools) {
@@ -323,8 +354,8 @@ async function createGateway(clients: ChildMcpClient[]): Promise<McpServer> {
             annotations: {
               audience: ['user', 'assistant'],
               priority: 0.5,
-              readOnlyHint: !isWrite,
               ...(source.annotations ?? {}),
+              readOnlyHint: !isWrite,
             },
           },
           async (args) => {
@@ -334,10 +365,15 @@ async function createGateway(clients: ChildMcpClient[]): Promise<McpServer> {
             return client.callTool(source.name, args);
           },
         );
+        onToolRegistered?.({
+          name: exposedName,
+          serverId: definition.id,
+          label: definition.label,
+          description: source.description ?? source.name,
+        });
       }
 
       // 2. 리소스(Resources) 전달 등록
-      const resources = await client.listResources();
       let registeredResourcesCount = 0;
       for (const resource of resources) {
         const namespacedUri = `mcp://${definition.id}/${resource.uri.replace('://', '/')}`;
@@ -359,7 +395,6 @@ async function createGateway(clients: ChildMcpClient[]): Promise<McpServer> {
       }
 
       // 3. 프롬프트(Prompts) 전달 등록
-      const prompts = await client.listPrompts();
       let registeredPromptsCount = 0;
       for (const prompt of prompts) {
         const namespacedName = namespacedToolName('mcp', definition.id, prompt.name);
@@ -406,7 +441,7 @@ async function createGateway(clients: ChildMcpClient[]): Promise<McpServer> {
       );
     } catch (error) {
       await client.close();
-      const errorMessage = describeError(error);
+      const errorMessage = client.safeErrorMessage(error);
       serverStatuses.push({
         id: definition.id,
         label: definition.label,
@@ -471,47 +506,56 @@ async function createGateway(clients: ChildMcpClient[]): Promise<McpServer> {
   return gateway;
 }
 
-let activeClients: ChildMcpClient[] = [];
-let shuttingDown = false;
-let handle: { close(): Promise<void> } | undefined;
-let gatewayReady: Promise<McpServer> | undefined;
-let gatewayStartedResolve: (() => void) | undefined;
-const gatewayStarted = new Promise<void>((resolve) => {
-  gatewayStartedResolve = resolve;
-});
+const isMainModule =
+  process.argv[1] !== undefined &&
+  path.resolve(process.argv[1]) === fileURLToPath(import.meta.url);
 
-async function closeChildren(): Promise<void> {
-  const clients = activeClients;
-  activeClients = [];
-  await Promise.allSettled(clients.map((client) => client.close()));
-}
+if (isMainModule) {
+  // stdio 통신 중 stdout은 MCP JSON-RPC 메시지만 사용함
+  console.log = (...args: unknown[]) => console.error(...args);
 
-const shutdown = async (): Promise<void> => {
-  if (shuttingDown) {
-    return;
+  let activeClients: ChildMcpClient[] = [];
+  let shuttingDown = false;
+  let handle: { close(): Promise<void> } | undefined;
+  let gatewayReady: Promise<McpServer> | undefined;
+  let gatewayStartedResolve: (() => void) | undefined;
+  const gatewayStarted = new Promise<void>((resolve) => {
+    gatewayStartedResolve = resolve;
+  });
+
+  async function closeChildren(): Promise<void> {
+    const clients = activeClients;
+    activeClients = [];
+    await Promise.allSettled(clients.map((client) => client.close()));
   }
-  shuttingDown = true;
-  await closeChildren();
-  await handle?.close();
-};
 
-const shutdownAfterInputEnd = async (): Promise<void> => {
-  await gatewayStarted;
-  await gatewayReady?.catch(() => undefined);
-  await shutdown();
-};
+  const shutdown = async (): Promise<void> => {
+    if (shuttingDown) {
+      return;
+    }
+    shuttingDown = true;
+    await closeChildren();
+    await handle?.close();
+  };
 
-process.once('SIGINT', () => void shutdown());
-process.once('SIGTERM', () => void shutdown());
-process.stdin.once('end', () => void shutdownAfterInputEnd());
-process.stdin.once('close', () => void shutdownAfterInputEnd());
-process.once('exit', () => void closeChildren());
+  const shutdownAfterInputEnd = async (): Promise<void> => {
+    await gatewayStarted;
+    await gatewayReady?.catch(() => undefined);
+    await shutdown();
+  };
 
-handle = serveStdio(async () => {
-  await closeChildren();
-  gatewayReady = createGateway(activeClients);
-  gatewayStartedResolve?.();
-  return gatewayReady;
-});
+  process.once('SIGINT', () => void shutdown());
+  process.once('SIGTERM', () => void shutdown());
+  process.stdin.once('end', () => void shutdownAfterInputEnd());
+  process.stdin.once('close', () => void shutdownAfterInputEnd());
+  process.once('exit', () => void closeChildren());
 
-console.error('mcp-platform generic MCP gateway running on stdio');
+  handle = serveStdio(async () => {
+    await closeChildren();
+    gatewayReady = createGateway(activeClients);
+    gatewayStartedResolve?.();
+    return gatewayReady;
+  });
+
+  console.error('mcp-platform generic MCP gateway running on stdio');
+}

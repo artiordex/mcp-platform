@@ -12,8 +12,3 @@ args = ["__MCP_PLATFORM_ROOT__/dist/servers/workspace-tools.js"]
 
 [mcp_servers.workspace-tools.env]
 MCP_WORKSPACE_ROOT = "__WORKSPACE_ROOT__"
-
-# 3. 공공데이터 6종 전용 게이트웨이 (옵션)
-[mcp_servers.data-go-portal]
-command = "/bin/bash"
-args = ["__MCP_PLATFORM_ROOT__/scripts/run-data-go-portal.sh"]

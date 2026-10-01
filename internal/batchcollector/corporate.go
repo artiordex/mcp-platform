@@ -19,20 +19,21 @@ import (
 // CorporateRecord 구조체는 개별 기업의 병렬 검증 결과임
 type CorporateRecord struct {
 	BusinessNumber string `json:"business_number"` // 10자리 사업자등록번호임
-	IsValidFormat  bool   `json:"is_valid_format"`  // 국세청 체크섬 유효 여부임
-	Status         string `json:"status"`           // 계속사업자/휴업/폐업 상태임
-	TaxType        string `json:"tax_type"`         // 일반과세자/간이과세자 구분임
-	VerifiedAt     string `json:"verified_at"`      // 검증 완료 시각임
+	IsValidFormat  bool   `json:"is_valid_format"` // 국세청 체크섬 유효 여부임
+	Status         string `json:"status"`          // 외부 등록상태를 조회하지 않은 경우 not_checked임
+	TaxType        string `json:"tax_type"`        // 외부 과세유형을 조회하지 않은 경우 not_checked임
+	VerifiedAt     string `json:"verified_at"`     // 검증 완료 시각임
 }
 
 // BatchCorporateResult 구조체는 기업 병렬 검증 배치 집계 결과임
 type BatchCorporateResult struct {
-	TotalCount    int               `json:"total_count"`    // 검증 요청 총 건수임
-	ValidCount    int               `json:"valid_count"`    // 체크섬 유효 사업자 수임
-	ActiveCount   int               `json:"active_count"`   // 계속사업자 수임
-	ElapsedMS     int64             `json:"elapsed_ms"`     // 총 소요시간(ms)임
-	ThroughputRPS float64           `json:"throughput_rps"` // 초당 처리율(Req/Sec)임
-	Records       []CorporateRecord `json:"records"`        // 기업별 상세 검증 목록임
+	TotalCount         int               `json:"total_count"`          // 검증 요청 총 건수임
+	ValidCount         int               `json:"-"`                    // 이전 호출부 호환용 체크섬 개수임
+	ActiveCount        int               `json:"-"`                    // 이전 호출부 호환용이며 실제 사업 상태는 조회하지 않음
+	ChecksumValidCount int               `json:"checksum_valid_count"` // 체크섬 형식이 유효한 번호 수임
+	ElapsedMS          int64             `json:"elapsed_ms"`           // 총 소요시간(ms)임
+	ThroughputRPS      float64           `json:"throughput_rps"`       // 초당 처리율(Req/Sec)임
+	Records            []CorporateRecord `json:"records"`              // 기업별 상세 검증 목록임
 }
 
 // ValidateCorporateParallel 함수는 사업자등록번호 목록을 고루틴 워커 풀로 병렬 검증함
@@ -55,14 +56,10 @@ func ValidateCorporateParallel(ctx context.Context, bnoList []string, concurrenc
 		cleanBno := strings.ReplaceAll(strings.TrimSpace(bno), "-", "")
 		isValid := checkBusinessNumberChecksum(cleanBno)
 
-		status := "불명"
-		taxType := "확인불가"
-
-		if isValid {
-			status = "계속사업자"
-			taxType = "부가가치세 일반과세자"
-		} else {
-			status = "등록번호 오류"
+		status := "not_checked"
+		taxType := "not_checked"
+		if !isValid {
+			status = "invalid_format"
 		}
 
 		return CorporateRecord{
@@ -77,7 +74,6 @@ func ValidateCorporateParallel(ctx context.Context, bnoList []string, concurrenc
 	results, elapsed := ExecuteParallel(ctx, bnoList, concurrency, task)
 
 	validCount := 0
-	activeCount := 0
 	var records []CorporateRecord
 
 	for _, res := range results {
@@ -89,9 +85,6 @@ func ValidateCorporateParallel(ctx context.Context, bnoList []string, concurrenc
 		if record.IsValidFormat {
 			validCount++
 		}
-		if record.Status == "계속사업자" {
-			activeCount++
-		}
 	}
 
 	var rps float64
@@ -102,12 +95,12 @@ func ValidateCorporateParallel(ctx context.Context, bnoList []string, concurrenc
 	}
 
 	return BatchCorporateResult{
-		TotalCount:    len(bnoList),
-		ValidCount:    validCount,
-		ActiveCount:   activeCount,
-		ElapsedMS:     elapsed.Milliseconds(),
-		ThroughputRPS: float64(int(rps*10)) / 10,
-		Records:       records,
+		TotalCount:         len(bnoList),
+		ValidCount:         validCount,
+		ChecksumValidCount: validCount,
+		ElapsedMS:          elapsed.Milliseconds(),
+		ThroughputRPS:      float64(int(rps*10)) / 10,
+		Records:            records,
 	}
 }
 

@@ -30,6 +30,7 @@ type BidRecord struct {
 
 // BatchBidsResult 구조체는 병렬 수집 집계 결과를 정의함
 type BatchBidsResult struct {
+	DataSource   string      `json:"data_source"`   // 결과 데이터의 실제 출처 구분임
 	TotalFetched int         `json:"total_fetched"` // 수집된 총 공고 건수임
 	UniqueCount  int         `json:"unique_count"`  // 중복 제거된 고유 공고 수임
 	TotalBudget  int64       `json:"total_budget"`  // 고유 공고 합산 예산 규모(원)임
@@ -83,6 +84,7 @@ func CollectBidsParallel(ctx context.Context, keywords []string, daysBack int, c
 	})
 
 	return BatchBidsResult{
+		DataSource:   "synthetic_demo",
 		TotalFetched: totalFetched,
 		UniqueCount:  len(uniqueBids),
 		TotalBudget:  totalBudget,
@@ -92,10 +94,16 @@ func CollectBidsParallel(ctx context.Context, keywords []string, daysBack int, c
 	}
 }
 
-// fetchBidsForKeyword 함수는 특정 키워드에 대해 모의/실제 공고 레코드를 생성함
+// fetchBidsForKeyword 함수는 실제 나라장터 조회가 아닌 데모용 공고 레코드를 생성함
 func fetchBidsForKeyword(ctx context.Context, keyword string, daysBack int) ([]BidRecord, error) {
-	// I/O 지연 시뮬레이션 (15~35ms)
-	time.Sleep(20 * time.Millisecond)
+	// 병렬 처리 벤치마크를 위한 데모 지연임. 실제 API 호출이 아님.
+	timer := time.NewTimer(20 * time.Millisecond)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	case <-timer.C:
+	}
 
 	agencies := []string{
 		"한국지능정보사회진흥원",
@@ -110,10 +118,13 @@ func fetchBidsForKeyword(ctx context.Context, keyword string, daysBack int) ([]B
 	now := time.Now()
 
 	var records []BidRecord
-	count := 3 // 키워드당 3건 생성
+	count := 3 // 키워드당 최대 3건의 합성 샘플 생성
 
 	for i := 0; i < count; i++ {
 		offsetHours := (i + 1) * 12
+		if offsetHours > daysBack*24 {
+			continue
+		}
 		postedAt := now.Add(-time.Duration(offsetHours) * time.Hour).Format("2006-01-02 15:04:00")
 		agency := agencies[(len(keyword)+i)%len(agencies)]
 		category := categories[(len(keyword)*2+i)%len(categories)]

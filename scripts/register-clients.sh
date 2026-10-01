@@ -12,11 +12,16 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 MCP_ROOT="$(cd -- "$SCRIPT_DIR/.." && pwd)"
-WORKSPACE_ROOT="$(cd -- "$MCP_ROOT/.." && pwd)"
+PROJECTS_ROOT="$(cd -- "$MCP_ROOT/.." && pwd)"
+WORKSPACE_ROOT="${MCP_WORKSPACE_ROOT:-$MCP_ROOT}"
 PYTHON="${PYTHON:-python3}"
 MERGE_SCRIPT="$SCRIPT_DIR/merge-client-config.py"
 
 echo "=== MCP Platform 클라이언트 안전 병합 등록 시작 ==="
+
+# 설정을 바꾸기 전에 실행 파일을 먼저 준비하여 깨진 빌드로 인한 등록을 방지함
+echo "--- TypeScript 게이트웨이 빌드 검증 ---"
+(cd "$MCP_ROOT" && npm run build)
 
 TMP_DIR="$(mktemp -d -t mcp-reg-XXXXXX)"
 trap 'rm -rf "$TMP_DIR"' EXIT
@@ -25,9 +30,27 @@ trap 'rm -rf "$TMP_DIR"' EXIT
 render_template() {
   local src="$1"
   local dst="$2"
-  sed -e "s|__MCP_PLATFORM_ROOT__|$MCP_ROOT|g" \
-      -e "s|__WORKSPACE_ROOT__|$WORKSPACE_ROOT|g" \
-      "$src" > "$dst"
+  local workspace_root="${3:-$WORKSPACE_ROOT}"
+  MCP_TEMPLATE_ROOT="$MCP_ROOT" \
+    MCP_TEMPLATE_WORKSPACE="$workspace_root" \
+    "$PYTHON" - "$src" "$dst" <<'PY'
+import json
+import os
+import sys
+from pathlib import Path
+
+source = Path(sys.argv[1])
+destination = Path(sys.argv[2])
+content = source.read_text(encoding="utf-8")
+replacements = {
+    "__MCP_PLATFORM_ROOT__": os.environ["MCP_TEMPLATE_ROOT"],
+    "__WORKSPACE_ROOT__": os.environ["MCP_TEMPLATE_WORKSPACE"],
+}
+for marker, value in replacements.items():
+    escaped = json.dumps(value, ensure_ascii=False)[1:-1]
+    content = content.replace(marker, escaped)
+destination.write_text(content, encoding="utf-8")
+PY
 }
 
 # 1. Codex (~/.codex/config.toml) 안전 병합
@@ -45,10 +68,12 @@ render_template "$MCP_ROOT/config/clients/vscode_mcp.json" "$TMP_VSCODE"
 echo "[OK] VS Code 작업 공간 설정 병합 완료: $VSCODE_CONFIG"
 
 # 3. internal-portal 프로젝트 작업 공간 설정 병합 (존재하는 경우)
-PORTAL_DIR="$WORKSPACE_ROOT/internal-portal"
+PORTAL_DIR="$PROJECTS_ROOT/internal-portal"
 if [[ -d "$PORTAL_DIR" ]]; then
   PORTAL_CONFIG="$PORTAL_DIR/.vscode/mcp.json"
-  "$PYTHON" "$MERGE_SCRIPT" json "$PORTAL_CONFIG" "$TMP_VSCODE"
+  TMP_PORTAL_VSCODE="$TMP_DIR/portal-vscode.json"
+  render_template "$MCP_ROOT/config/clients/vscode_mcp.json" "$TMP_PORTAL_VSCODE" "${MCP_WORKSPACE_ROOT:-$PORTAL_DIR}"
+  "$PYTHON" "$MERGE_SCRIPT" json "$PORTAL_CONFIG" "$TMP_PORTAL_VSCODE"
   echo "[OK] internal-portal MCP 설정 병합 완료: $PORTAL_CONFIG"
 fi
 
@@ -82,8 +107,4 @@ if [[ -d "$AGY_DIR" ]]; then
   echo "[OK] Antigravity 설정 병합 완료: $AGY_CONFIG"
 fi
 
-# 7. 게이트웨이 빌드 상태 검증
-echo "--- TypeScript 게이트웨이 빌드 검증 ---"
-(cd "$MCP_ROOT" && npm run build)
-
-echo "=== MCP 클라이언트 설정 보존 병합 및 빌드 완료 ==="
+echo "=== MCP 클라이언트 설정 보존 병합 완료 ==="

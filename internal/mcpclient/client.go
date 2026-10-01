@@ -15,6 +15,8 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
+	"runtime"
 	"strings"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -27,7 +29,13 @@ func GreetWithLocalServer(ctx context.Context, name string) (string, error) {
 		Version: "0.1.0",
 	}, nil)
 
+	_, sourceFile, _, ok := runtime.Caller(0)
+	if !ok {
+		return "", fmt.Errorf("mcp-platform 저장소 경로를 확인할 수 없음")
+	}
+	projectRoot := filepath.Clean(filepath.Join(filepath.Dir(sourceFile), "../.."))
 	command := exec.CommandContext(ctx, "go", "run", "./cmd/mcp-go-server")
+	command.Dir = projectRoot
 	command.Stderr = os.Stderr
 	session, err := client.Connect(ctx, &mcp.CommandTransport{Command: command}, nil)
 	if err != nil {

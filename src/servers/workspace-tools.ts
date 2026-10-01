@@ -18,6 +18,16 @@ const workspaceRoot = path.resolve(
   process.env.MCP_WORKSPACE_ROOT ?? process.cwd(),
 );
 const maxReadBytes = 256 * 1024;
+const maxGrepFileBytes = 1024 * 1024;
+const maxGrepTotalBytes = 16 * 1024 * 1024;
+const maxGrepFiles = 100;
+const maxGrepPatternChars = 256;
+const maxGrepResultChars = 64 * 1024;
+const maxGrepLineChars = 500;
+const maxListedFiles = 2_000;
+const maxSummaryFiles = 5_000;
+const maxDirectoryEntries = 20_000;
+const maxVisibleRootEntries = 1_000;
 const ignoredDirectories = new Set([
   '.git',
   '.venv',
@@ -82,36 +92,108 @@ async function resolveAccessiblePath(
 /**
  * 디렉터리를 재귀 탐색하여 숨김 제외 가시 파일 목록을 수집함
  */
+type FileCollection = {
+  files: string[];
+  visitedEntries: number;
+  maxFiles: number;
+  truncated: boolean;
+};
+
+function createFileCollection(maxFiles: number): FileCollection {
+  return { files: [], visitedEntries: 0, maxFiles, truncated: false };
+}
+
 async function collectFiles(
   directory: string,
   realWorkspaceRoot: string,
   maxDepth: number,
+  collection: FileCollection,
   currentDepth = 0,
-): Promise<string[]> {
-  const entries = await fs.readdir(directory, { withFileTypes: true });
-  const files: string[] = [];
+): Promise<FileCollection> {
+  if (collection.files.length >= collection.maxFiles) {
+    collection.truncated = true;
+    return collection;
+  }
 
-  for (const entry of entries.sort((left, right) =>
-    left.name.localeCompare(right.name),
-  )) {
+  const handle = await fs.opendir(directory);
+  const entries = [];
+  for await (const entry of handle) {
+    collection.visitedEntries++;
+    if (collection.visitedEntries > maxDirectoryEntries) {
+      collection.truncated = true;
+      break;
+    }
+    entries.push(entry);
+  }
+
+  entries.sort((left, right) => left.name.localeCompare(right.name));
+  for (const entry of entries) {
+    if (collection.files.length >= collection.maxFiles) {
+      collection.truncated = true;
+      break;
+    }
     if (entry.name.startsWith('.') || ignoredDirectories.has(entry.name)) {
       continue;
     }
 
     const entryPath = path.join(directory, entry.name);
     if (entry.isFile()) {
-      files.push(path.relative(realWorkspaceRoot, entryPath));
+      collection.files.push(path.relative(realWorkspaceRoot, entryPath));
       continue;
     }
 
     if (entry.isDirectory() && currentDepth < maxDepth) {
-      files.push(
-        ...(await collectFiles(entryPath, realWorkspaceRoot, maxDepth, currentDepth + 1)),
+      await collectFiles(
+        entryPath,
+        realWorkspaceRoot,
+        maxDepth,
+        collection,
+        currentDepth + 1,
       );
+      if (collection.truncated) break;
     }
   }
 
-  return files;
+  return collection;
+}
+
+async function listVisibleRootEntries(
+  directory: string,
+): Promise<{ entries: string[]; truncated: boolean }> {
+  const handle = await fs.opendir(directory);
+  const entries: string[] = [];
+  let truncated = false;
+  for await (const entry of handle) {
+    if (entry.name.startsWith('.') || ignoredDirectories.has(entry.name)) continue;
+    if (entries.length >= maxVisibleRootEntries) {
+      truncated = true;
+      break;
+    }
+    entries.push(`${entry.isDirectory() ? 'dir ' : 'file'} ${entry.name}`);
+  }
+  entries.sort((left, right) => left.localeCompare(right));
+  return { entries, truncated };
+}
+
+async function readFilePrefix(filePath: string, maxBytes: number): Promise<Buffer> {
+  const file = await fs.open(filePath, 'r');
+  try {
+    const buffer = Buffer.alloc(maxBytes + 1);
+    let totalBytes = 0;
+    while (totalBytes < buffer.length) {
+      const { bytesRead } = await file.read(
+        buffer,
+        totalBytes,
+        buffer.length - totalBytes,
+        totalBytes,
+      );
+      if (bytesRead === 0) break;
+      totalBytes += bytesRead;
+    }
+    return buffer.subarray(0, totalBytes);
+  } finally {
+    await file.close();
+  }
 }
 
 /**
@@ -131,15 +213,7 @@ function createServer(): McpServer {
       inputSchema: z.object({}),
     },
     async () => {
-      const entries = await fs.readdir(workspaceRoot, { withFileTypes: true });
-      const visibleEntries = entries
-        .filter(
-          (entry) =>
-            !entry.name.startsWith('.') &&
-            !ignoredDirectories.has(entry.name),
-        )
-        .sort((left, right) => left.name.localeCompare(right.name))
-        .map((entry) => `${entry.isDirectory() ? 'dir ' : 'file'} ${entry.name}`);
+      const { entries: visibleEntries, truncated } = await listVisibleRootEntries(workspaceRoot);
 
       return {
         content: [
@@ -148,6 +222,7 @@ function createServer(): McpServer {
             text: [
               `workspace_root: ${workspaceRoot}`,
               `entries: ${visibleEntries.length}`,
+              ...(truncated ? ['(표시 항목이 1,000개로 제한됨)'] : []),
               ...visibleEntries,
             ].join('\n'),
           },
@@ -183,12 +258,23 @@ function createServer(): McpServer {
         };
       }
 
-      const files = await collectFiles(directory, realWorkspaceRoot, maxDepth);
+      const collection = await collectFiles(
+        directory,
+        realWorkspaceRoot,
+        maxDepth,
+        createFileCollection(maxListedFiles + 1),
+      );
+      const files = collection.files.slice(0, maxListedFiles);
       return {
         content: [
           {
             type: 'text',
-            text: files.length > 0 ? files.join('\n') : '(표시 가능한 파일 없음)',
+            text: [
+              ...(files.length > 0 ? files : ['(표시 가능한 파일 없음)']),
+              ...(collection.truncated || collection.files.length > maxListedFiles
+                ? ['(파일 목록이 2,000개로 제한됨)']
+                : []),
+            ].join('\n'),
           },
         ],
       };
@@ -215,7 +301,7 @@ function createServer(): McpServer {
         };
       }
 
-      const contents = await fs.readFile(filePath);
+      const contents = await readFilePrefix(filePath, maxReadBytes);
       if (contents.includes(0)) {
         return {
           content: [{ type: 'text', text: '바이너리 파일은 읽을 수 없음' }],
@@ -245,9 +331,13 @@ function createServer(): McpServer {
     'grep_workspace_files',
     {
       description:
-        '워크스페이스 내 가시 텍스트 파일에서 문자열 또는 정규표현식 일치 항목을 검색함',
+        '워크스페이스 내 가시 텍스트 파일에서 리터럴 문자열을 검색함 (정규표현식은 지원하지 않음)',
       inputSchema: z.object({
-        pattern: z.string().min(1).describe('검색할 문자열 또는 정규표현식 패턴임'),
+        pattern: z
+          .string()
+          .min(1)
+          .max(maxGrepPatternChars)
+          .describe('검색할 리터럴 문자열임 (정규표현식은 지원하지 않음)'),
         path: z.string().default('.').describe('검색을 시작할 상대 경로임'),
         maxMatches: z.number().int().min(1).max(100).default(30).describe('반환할 최대 일치 건수임'),
       }),
@@ -255,33 +345,60 @@ function createServer(): McpServer {
     async ({ pattern, path: relativePath, maxMatches }) => {
       const { absolutePath: directory } = await resolveAccessiblePath(relativePath);
       const realWorkspaceRoot = await fs.realpath(workspaceRoot);
-      const files = await collectFiles(directory, realWorkspaceRoot, 3);
-
-      let regex: RegExp;
-      try {
-        regex = new RegExp(pattern, 'i');
-      } catch (error) {
-        const errorMsg = error instanceof Error ? error.message : String(error);
-        return {
-          content: [{ type: 'text', text: `정규표현식 문법 오류임: ${errorMsg}` }],
-          isError: true,
-        };
-      }
-
+      const collection = await collectFiles(
+        directory,
+        realWorkspaceRoot,
+        3,
+        createFileCollection(maxGrepFiles + 1),
+      );
+      const needle = pattern.toLowerCase();
       const matches: string[] = [];
-      for (const relFile of files) {
+      let scannedBytes = 0;
+      let resultChars = 0;
+      let truncated = collection.truncated || collection.files.length > maxGrepFiles;
+      for (const relFile of collection.files.slice(0, maxGrepFiles)) {
         if (matches.length >= maxMatches) break;
         const fullPath = path.join(realWorkspaceRoot, relFile);
         try {
-          const content = await fs.readFile(fullPath);
+          const stats = await fs.stat(fullPath);
+          if (!stats.isFile()) continue;
+          if (stats.size > maxGrepFileBytes) {
+            truncated = true;
+            continue;
+          }
+          const bytesRemaining = maxGrepTotalBytes - scannedBytes;
+          if (bytesRemaining <= 0) {
+            truncated = true;
+            break;
+          }
+          const readLimit = Math.min(maxGrepFileBytes, bytesRemaining);
+          const content = await readFilePrefix(fullPath, readLimit);
+          scannedBytes += content.length;
+          if (stats.size > content.length) truncated = true;
           if (content.includes(0)) continue; // 바이너리 제외
-          const lines = content.toString('utf8').split('\n');
-          for (let i = 0; i < lines.length; i++) {
-            if (regex.test(lines[i])) {
-              matches.push(`${relFile}:${i + 1}: ${lines[i].trim()}`);
+          const text = content.toString('utf8');
+          let lineStart = 0;
+          let lineNumber = 1;
+          while (lineStart <= text.length) {
+            const newline = text.indexOf('\n', lineStart);
+            const lineEnd = newline === -1 ? text.length : newline;
+            const line = text.slice(lineStart, lineEnd);
+            if (line.toLowerCase().includes(needle)) {
+              const excerpt = line.trim().slice(0, maxGrepLineChars);
+              const match = `${relFile}:${lineNumber}: ${excerpt}${line.trim().length > maxGrepLineChars ? '…' : ''}`;
+              if (resultChars + match.length + 1 > maxGrepResultChars) {
+                truncated = true;
+                break;
+              }
+              matches.push(match);
+              resultChars += match.length + 1;
               if (matches.length >= maxMatches) break;
             }
+            if (newline === -1) break;
+            lineStart = newline + 1;
+            lineNumber++;
           }
+          if (resultChars >= maxGrepResultChars || scannedBytes >= maxGrepTotalBytes) break;
         } catch {
           // 읽기 실패 파일 건너뜀
         }
@@ -293,8 +410,14 @@ function createServer(): McpServer {
             type: 'text',
             text:
               matches.length > 0
-                ? [`검색 결과 (총 ${matches.length}건 일치함):`, ...matches].join('\n')
-                : '일치하는 내용을 찾지 못함',
+                ? [
+                    `검색 결과 (최대 ${matches.length}건 표시함):`,
+                    ...matches,
+                    ...(truncated ? ['(검색량 또는 응답 크기 제한으로 결과가 일부 생략됨)'] : []),
+                  ].join('\n')
+                : truncated
+                  ? '검색량 제한에 도달해 결과가 일부 생략됨'
+                  : '일치하는 내용을 찾지 못함',
           },
         ],
       };
@@ -313,7 +436,13 @@ function createServer(): McpServer {
     async ({ path: relativePath }) => {
       const { absolutePath: directory } = await resolveAccessiblePath(relativePath);
       const realWorkspaceRoot = await fs.realpath(workspaceRoot);
-      const files = await collectFiles(directory, realWorkspaceRoot, 4);
+      const collection = await collectFiles(
+        directory,
+        realWorkspaceRoot,
+        4,
+        createFileCollection(maxSummaryFiles + 1),
+      );
+      const files = collection.files.slice(0, maxSummaryFiles);
 
       const extCount: Record<string, number> = {};
       for (const file of files) {
@@ -325,6 +454,9 @@ function createServer(): McpServer {
       const lines = [
         `# 워크스페이스 요약 보고서 (${relativePath})`,
         `총 가시 파일 수: ${files.length}개`,
+        ...(collection.truncated || collection.files.length > maxSummaryFiles
+          ? ['(파일 수집이 5,000개로 제한됨)']
+          : []),
         '',
         '## 파일 확장자별 통계:',
         ...sorted.map(([ext, cnt]) => `- ${ext}: ${cnt}개`),

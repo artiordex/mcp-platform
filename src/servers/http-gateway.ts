@@ -8,15 +8,15 @@
  */
 
 import { execFile } from 'node:child_process';
-import { randomUUID } from 'node:crypto';
+import { randomUUID, timingSafeEqual } from 'node:crypto';
 import { promises as fs } from 'node:fs';
 import http from 'node:http';
+import { isIP } from 'node:net';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 
 import {
-  McpServer,
   WebStandardStreamableHTTPServerTransport,
   localhostAllowedHostnames,
   localhostAllowedOrigins,
@@ -25,34 +25,55 @@ import {
 } from '@modelcontextprotocol/server';
 import * as z from 'zod/v4';
 
+import type { ChildMcpClient } from '../clients/child-mcp-client.js';
+import { createGateway, type GatewayToolSummary } from './mcp-gateway.js';
+
 const execFileAsync = promisify(execFile);
 const projectRoot = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)),
   '../..',
 );
 
+function readIntegerSetting(
+  name: string,
+  fallback: number,
+  minimum: number,
+  maximum: number,
+): number {
+  const raw = process.env[name];
+  if (raw === undefined) return fallback;
+  if (!/^\d+$/.test(raw)) {
+    throw new Error(`${name} 값은 ${minimum}에서 ${maximum} 사이의 정수여야 함`);
+  }
+  const value = Number(raw);
+  if (!Number.isSafeInteger(value) || value < minimum || value > maximum) {
+    throw new Error(`${name} 값은 ${minimum}에서 ${maximum} 사이의 정수여야 함`);
+  }
+  return value;
+}
+
 // 1. 네트워크 및 보안 기본 설정
-const PORT = Number(process.env.MCP_HTTP_PORT ?? process.env.PORT ?? 8120);
+const defaultPort =
+  process.env.PORT === undefined ? 8120 : readIntegerSetting('PORT', 8120, 0, 65535);
+const PORT = readIntegerSetting('MCP_HTTP_PORT', defaultPort, 0, 65535);
 const HOST = process.env.MCP_HTTP_HOST ?? '127.0.0.1';
 const bearerToken = process.env.MCP_HTTP_BEARER_TOKEN;
 const adminToken = process.env.MCP_ADMIN_TOKEN ?? bearerToken;
 const enableWorkspaceHttp = process.env.MCP_ENABLE_WORKSPACE_HTTP === 'true';
+const RATE_LIMIT_PER_SEC = readIntegerSetting('MCP_HTTP_RATE_LIMIT', 120, 1, 100_000);
 
 const MAX_BODY_BYTES = 1024 * 1024; // 1 MB
-const REQUEST_TIMEOUT_MS = 30_000; // 30초
+const REQUEST_TIMEOUT_MS = 30_000; // 요청 헤더와 본문 수신 제한
 
 /**
  * IP/호스트명이 루프백 주소인지 판별함
  */
 function isLoopbackAddress(host: string): boolean {
-  return (
-    host === '127.0.0.1' ||
-    host === 'localhost' ||
-    host === '::1' ||
-    host === '[::1]' ||
-    host.startsWith('127.') ||
-    host === '::ffff:127.0.0.1'
-  );
+  const normalized = host.replace(/^\[|\]$/g, '').toLowerCase();
+  if (normalized === 'localhost') return true;
+  const version = isIP(normalized);
+  if (version === 4) return normalized.split('.')[0] === '127';
+  return version === 6 && normalized === '::1';
 }
 
 // 비루프백 주소 바인딩 시 인증 토큰 강제 검증
@@ -61,6 +82,9 @@ if (!isLoopbackAddress(HOST) && !bearerToken) {
     `[mcp-platform] 보안 오류: 비루프백 주소(${HOST})로 바인딩 시 MCP_HTTP_BEARER_TOKEN 환경변수가 반드시 설정되어야 함`,
   );
   process.exit(1);
+}
+if (!HOST.trim()) {
+  throw new Error('MCP_HTTP_HOST 값이 비어 있음');
 }
 
 // Host 및 Origin 허용 목록 구성
@@ -85,6 +109,16 @@ const workspaceRoot = path.resolve(
   process.env.MCP_WORKSPACE_ROOT ?? process.cwd(),
 );
 const maxReadBytes = 256 * 1024;
+const maxGrepFileBytes = 1024 * 1024;
+const maxGrepTotalBytes = 16 * 1024 * 1024;
+const maxGrepFiles = 100;
+const maxGrepPatternChars = 256;
+const maxGrepResultChars = 64 * 1024;
+const maxGrepLineChars = 500;
+const maxListedFiles = 2_000;
+const maxSummaryFiles = 5_000;
+const maxDirectoryEntries = 20_000;
+const maxVisibleRootEntries = 1_000;
 const ignoredDirectories = new Set([
   '.git',
   '.venv',
@@ -146,36 +180,116 @@ async function resolveAccessiblePath(
 /**
  * 디렉터리를 재귀 탐색하여 가시 파일 목록을 수집함
  */
+type FileCollection = {
+  files: string[];
+  visitedEntries: number;
+  maxFiles: number;
+  truncated: boolean;
+};
+
+function createFileCollection(maxFiles: number): FileCollection {
+  return { files: [], visitedEntries: 0, maxFiles, truncated: false };
+}
+
 async function collectFiles(
   directory: string,
   realWorkspaceRoot: string,
   maxDepth: number,
+  collection: FileCollection,
   currentDepth = 0,
-): Promise<string[]> {
-  const entries = await fs.readdir(directory, { withFileTypes: true });
-  const files: string[] = [];
+): Promise<FileCollection> {
+  if (collection.files.length >= collection.maxFiles) {
+    collection.truncated = true;
+    return collection;
+  }
 
-  for (const entry of entries.sort((left, right) =>
-    left.name.localeCompare(right.name),
-  )) {
+  const handle = await fs.opendir(directory);
+  const entries = [];
+  for await (const entry of handle) {
+    collection.visitedEntries++;
+    if (collection.visitedEntries > maxDirectoryEntries) {
+      collection.truncated = true;
+      break;
+    }
+    entries.push(entry);
+  }
+
+  entries.sort((left, right) => left.name.localeCompare(right.name));
+  for (const entry of entries) {
+    if (collection.files.length >= collection.maxFiles) {
+      collection.truncated = true;
+      break;
+    }
     if (entry.name.startsWith('.') || ignoredDirectories.has(entry.name)) {
       continue;
     }
 
     const entryPath = path.join(directory, entry.name);
     if (entry.isFile()) {
-      files.push(path.relative(realWorkspaceRoot, entryPath));
+      collection.files.push(path.relative(realWorkspaceRoot, entryPath));
       continue;
     }
 
     if (entry.isDirectory() && currentDepth < maxDepth) {
-      files.push(
-        ...(await collectFiles(entryPath, realWorkspaceRoot, maxDepth, currentDepth + 1)),
+      await collectFiles(
+        entryPath,
+        realWorkspaceRoot,
+        maxDepth,
+        collection,
+        currentDepth + 1,
       );
+      if (collection.truncated) break;
     }
   }
 
-  return files;
+  return collection;
+}
+
+async function listVisibleRootEntries(
+  directory: string,
+): Promise<{ entries: string[]; truncated: boolean }> {
+  const handle = await fs.opendir(directory);
+  const entries: string[] = [];
+  let truncated = false;
+  for await (const entry of handle) {
+    if (entry.name.startsWith('.') || ignoredDirectories.has(entry.name)) continue;
+    if (entries.length >= maxVisibleRootEntries) {
+      truncated = true;
+      break;
+    }
+    entries.push(`${entry.isDirectory() ? 'dir' : 'file'}: ${entry.name}`);
+  }
+  entries.sort((left, right) => left.localeCompare(right));
+  return { entries, truncated };
+}
+
+function boundedInteger(value: unknown, fallback: number, minimum: number, maximum: number): number {
+  const parsed = value === undefined ? fallback : Number(value);
+  if (!Number.isSafeInteger(parsed) || parsed < minimum || parsed > maximum) {
+    throw new Error(`정수 매개변수는 ${minimum}에서 ${maximum} 사이여야 함`);
+  }
+  return parsed;
+}
+
+async function readFilePrefix(filePath: string, maxBytes: number): Promise<Buffer> {
+  const file = await fs.open(filePath, 'r');
+  try {
+    const buffer = Buffer.alloc(maxBytes + 1);
+    let totalBytes = 0;
+    while (totalBytes < buffer.length) {
+      const { bytesRead } = await file.read(
+        buffer,
+        totalBytes,
+        buffer.length - totalBytes,
+        totalBytes,
+      );
+      if (bytesRead === 0) break;
+      totalBytes += bytesRead;
+    }
+    return buffer.subarray(0, totalBytes);
+  } finally {
+    await file.close();
+  }
 }
 
 /**
@@ -192,30 +306,37 @@ async function handleWorkspaceToolCall(
   }
 
   if (name === 'workspace_status') {
-    const entries = await fs.readdir(workspaceRoot, { withFileTypes: true });
-    const visibleEntries = entries
-      .filter((entry) => !entry.name.startsWith('.') && !ignoredDirectories.has(entry.name))
-      .sort((left, right) => left.name.localeCompare(right.name))
-      .map((entry) => `${entry.isDirectory() ? 'dir' : 'file'}: ${entry.name}`);
+    const { entries: visibleEntries, truncated } = await listVisibleRootEntries(workspaceRoot);
 
     return {
       workspace_root: workspaceRoot,
       total_entries: visibleEntries.length,
+      truncated,
       entries: visibleEntries,
     };
   }
 
   if (name === 'list_project_files') {
     const relPath = args.path || '.';
-    const depth = Number(args.maxDepth ?? 2);
+    const depth = boundedInteger(args.maxDepth, 2, 0, 4);
     const { absolutePath: directory } = await resolveAccessiblePath(relPath);
     const realRoot = await fs.realpath(workspaceRoot);
     const stats = await fs.stat(directory);
     if (!stats.isDirectory()) {
       throw new Error('요청한 경로가 디렉터리가 아님');
     }
-    const files = await collectFiles(directory, realRoot, depth);
-    return { count: files.length, files };
+    const collection = await collectFiles(
+      directory,
+      realRoot,
+      depth,
+      createFileCollection(maxListedFiles + 1),
+    );
+    const files = collection.files.slice(0, maxListedFiles);
+    return {
+      count: files.length,
+      files,
+      truncated: collection.truncated || collection.files.length > maxListedFiles,
+    };
   }
 
   if (name === 'read_project_file') {
@@ -224,7 +345,7 @@ async function handleWorkspaceToolCall(
     const { absolutePath: filePath, relativePath: visiblePath } = await resolveAccessiblePath(relPath);
     const stats = await fs.stat(filePath);
     if (!stats.isFile()) throw new Error('요청한 경로가 일반 파일이 아님');
-    const contents = await fs.readFile(filePath);
+    const contents = await readFilePrefix(filePath, maxReadBytes);
     if (contents.includes(0)) throw new Error('바이너리 파일은 읽을 수 없음');
     const text = contents.subarray(0, maxReadBytes).toString('utf8');
     return {
@@ -238,39 +359,85 @@ async function handleWorkspaceToolCall(
   if (name === 'grep_workspace_files') {
     const pattern = String(args.pattern || '');
     if (!pattern) throw new Error('pattern 매개변수가 필수임');
+    if (pattern.length > maxGrepPatternChars) {
+      throw new Error(`검색 문자열은 ${maxGrepPatternChars}자 이하여야 함`);
+    }
     const relPath = args.path || '.';
-    const maxMatches = Number(args.maxMatches ?? 30);
+    const maxMatches = boundedInteger(args.maxMatches, 30, 1, 100);
     const { absolutePath: directory } = await resolveAccessiblePath(relPath);
     const realRoot = await fs.realpath(workspaceRoot);
-    const files = await collectFiles(directory, realRoot, 3);
-
-    const regex = new RegExp(pattern, 'i');
+    const collection = await collectFiles(
+      directory,
+      realRoot,
+      3,
+      createFileCollection(maxGrepFiles + 1),
+    );
+    const needle = pattern.toLowerCase();
     const matches: string[] = [];
-    for (const file of files) {
+    let scannedBytes = 0;
+    let resultChars = 0;
+    let truncated = collection.truncated || collection.files.length > maxGrepFiles;
+    for (const file of collection.files.slice(0, maxGrepFiles)) {
       if (matches.length >= maxMatches) break;
       const fullPath = path.join(realRoot, file);
       try {
-        const content = await fs.readFile(fullPath);
+        const stats = await fs.stat(fullPath);
+        if (!stats.isFile()) continue;
+        if (stats.size > maxGrepFileBytes) {
+          truncated = true;
+          continue;
+        }
+        const bytesRemaining = maxGrepTotalBytes - scannedBytes;
+        if (bytesRemaining <= 0) {
+          truncated = true;
+          break;
+        }
+        const readLimit = Math.min(maxGrepFileBytes, bytesRemaining);
+        const content = await readFilePrefix(fullPath, readLimit);
+        scannedBytes += content.length;
+        if (stats.size > content.length) truncated = true;
         if (content.includes(0)) continue;
-        const lines = content.toString('utf8').split('\n');
-        for (let i = 0; i < lines.length; i++) {
-          if (regex.test(lines[i])) {
-            matches.push(`${file}:${i + 1}: ${lines[i].trim()}`);
+        const text = content.toString('utf8');
+        let lineStart = 0;
+        let lineNumber = 1;
+        while (lineStart <= text.length) {
+          const newline = text.indexOf('\n', lineStart);
+          const lineEnd = newline === -1 ? text.length : newline;
+          const line = text.slice(lineStart, lineEnd);
+          if (line.toLowerCase().includes(needle)) {
+            const trimmedLine = line.trim();
+            const match = `${file}:${lineNumber}: ${trimmedLine.slice(0, maxGrepLineChars)}${trimmedLine.length > maxGrepLineChars ? '…' : ''}`;
+            if (resultChars + match.length + 1 > maxGrepResultChars) {
+              truncated = true;
+              break;
+            }
+            matches.push(match);
+            resultChars += match.length + 1;
             if (matches.length >= maxMatches) break;
           }
+          if (newline === -1) break;
+          lineStart = newline + 1;
+          lineNumber++;
         }
+        if (resultChars >= maxGrepResultChars || scannedBytes >= maxGrepTotalBytes) break;
       } catch {
         // 무시
       }
     }
-    return { count: matches.length, matches };
+    return { count: matches.length, matches, truncated };
   }
 
   if (name === 'workspace_project_summary') {
     const relPath = args.path || '.';
     const { absolutePath: directory } = await resolveAccessiblePath(relPath);
     const realRoot = await fs.realpath(workspaceRoot);
-    const files = await collectFiles(directory, realRoot, 4);
+    const collection = await collectFiles(
+      directory,
+      realRoot,
+      4,
+      createFileCollection(maxSummaryFiles + 1),
+    );
+    const files = collection.files.slice(0, maxSummaryFiles);
 
     const extCount: Record<string, number> = {};
     for (const file of files) {
@@ -280,6 +447,7 @@ async function handleWorkspaceToolCall(
     return {
       workspace_path: relPath,
       total_files: files.length,
+      truncated: collection.truncated || collection.files.length > maxSummaryFiles,
       extensions: extCount,
     };
   }
@@ -313,9 +481,9 @@ const WORKSPACE_TOOLS_DEFINITION = [
   },
   {
     name: 'grep_workspace_files',
-    description: '워크스페이스 내 텍스트 파일에서 문자열 또는 정규표현식 일치 항목을 검색함',
+    description: '워크스페이스 내 텍스트 파일에서 리터럴 문자열을 검색함 (정규표현식은 지원하지 않음)',
     parameters: {
-      pattern: { type: 'string', required: true, description: '검색할 정규표현식 또는 문자열임' },
+      pattern: { type: 'string', required: true, description: '검색할 리터럴 문자열임 (최대 256자)' },
       path: { type: 'string', default: '.', description: '검색을 시작할 상대 경로임' },
       maxMatches: { type: 'number', default: 30, description: '최대 반환 일치 건수임' },
     },
@@ -336,9 +504,14 @@ const httpTransport = new WebStandardStreamableHTTPServerTransport({
   sessionIdGenerator: () => randomUUID(),
 });
 
-const httpMcpServer = new McpServer({
-  name: 'mcp-platform-http-gateway',
-  version: '0.1.0',
+const forwardedTools: GatewayToolSummary[] = [];
+const httpGatewayClients: ChildMcpClient[] = [];
+const httpMcpServer = await createGateway(
+  httpGatewayClients,
+  (tool) => forwardedTools.push(tool),
+).catch(async (error: unknown) => {
+  await Promise.allSettled(httpGatewayClients.map((client) => client.close()));
+  throw error;
 });
 
 // 워크스페이스 도구가 명시적으로 활성화된 경우에만 MCP 서버에 등록함
@@ -361,7 +534,7 @@ if (enableWorkspaceHttp) {
       description: '워크스페이스 상대 디렉터리의 가시 파일 목록을 반환함 (읽기 전용임)',
       inputSchema: {
         path: z.string().optional().describe('상대 디렉터리 경로임'),
-        maxDepth: z.number().optional().describe('최대 탐색 깊이임'),
+        maxDepth: z.number().int().min(0).max(4).optional().describe('최대 탐색 깊이임'),
       },
       annotations: { readOnlyHint: true, idempotentHint: true },
     },
@@ -389,11 +562,11 @@ if (enableWorkspaceHttp) {
   httpMcpServer.registerTool(
     'grep_workspace_files',
     {
-      description: '워크스페이스 내 텍스트 파일에서 문자열 또는 정규표현식 일치 항목을 검색함',
+      description: '워크스페이스 내 텍스트 파일에서 리터럴 문자열을 검색함 (정규표현식은 지원하지 않음)',
       inputSchema: {
-        pattern: z.string().describe('검색할 문자열 또는 정규표현식임'),
+        pattern: z.string().min(1).max(maxGrepPatternChars).describe('검색할 리터럴 문자열임'),
         path: z.string().optional().describe('검색 경로임'),
-        maxMatches: z.number().optional().describe('최대 일치 건수임'),
+        maxMatches: z.number().int().min(1).max(100).optional().describe('최대 일치 건수임'),
       },
       annotations: { readOnlyHint: true, idempotentHint: true },
     },
@@ -446,7 +619,12 @@ httpMcpServer.registerTool(
 );
 
 // MCP 서버와 HTTP 트랜스포트 바인딩 완료
-await httpMcpServer.connect(httpTransport);
+try {
+  await httpMcpServer.connect(httpTransport);
+} catch (error) {
+  await httpMcpServer.close();
+  throw error;
+}
 
 // 3. 메트릭 및 레이트 리미터 정의
 interface GatewayMetrics {
@@ -467,40 +645,87 @@ const metrics: GatewayMetrics = {
   startedAt: new Date().toISOString(),
 };
 
-// IP별 요청 타임스탬프 슬라이딩 윈도우
-const rateLimitMap = new Map<string, number[]>();
-const RATE_LIMIT_PER_SEC = Number(process.env.MCP_HTTP_RATE_LIMIT ?? 120);
+// IP별 고정 1초 요청 카운터. 클라이언트 수와 상태 메모리를 제한함.
+type RateLimitState = { windowStartedAt: number; requestCount: number };
+const rateLimitMap = new Map<string, RateLimitState>();
+const MAX_RATE_LIMIT_CLIENTS = 10_000;
+let lastRateLimitCleanupAt = 0;
 
 function checkRateLimit(clientIp: string): boolean {
   const now = Date.now();
-  const windowStart = now - 1000;
-  let timestamps = rateLimitMap.get(clientIp);
-  if (!timestamps) {
-    timestamps = [];
-    rateLimitMap.set(clientIp, timestamps);
+  let state = rateLimitMap.get(clientIp);
+  if (!state) {
+    if (rateLimitMap.size >= MAX_RATE_LIMIT_CLIENTS) {
+      if (now - lastRateLimitCleanupAt >= 1000) {
+        for (const [ip, entry] of rateLimitMap) {
+          if (now - entry.windowStartedAt >= 1000) rateLimitMap.delete(ip);
+        }
+        lastRateLimitCleanupAt = now;
+      }
+      if (rateLimitMap.size >= MAX_RATE_LIMIT_CLIENTS) return false;
+    }
+    state = { windowStartedAt: now, requestCount: 0 };
+    rateLimitMap.set(clientIp, state);
   }
-  const filtered = timestamps.filter((t) => t > windowStart);
-  if (filtered.length >= RATE_LIMIT_PER_SEC) {
-    rateLimitMap.set(clientIp, filtered);
-    return false;
+  if (now - state.windowStartedAt >= 1000) {
+    state.windowStartedAt = now;
+    state.requestCount = 0;
   }
-  filtered.push(now);
-  rateLimitMap.set(clientIp, filtered);
+  if (state.requestCount >= RATE_LIMIT_PER_SEC) return false;
+  state.requestCount++;
   return true;
 }
 
+function waitForResponseDrain(res: http.ServerResponse): Promise<void> {
+  return new Promise((resolve) => {
+    const cleanup = () => {
+      res.off('drain', onDrain);
+      res.off('close', onClose);
+    };
+    const onDrain = () => {
+      cleanup();
+      resolve();
+    };
+    const onClose = () => {
+      cleanup();
+      resolve();
+    };
+    res.once('drain', onDrain);
+    res.once('close', onClose);
+  });
+}
+
 // 4. HTTP 요청 디스패처 및 보안 미들웨어
-const server = http.createServer(async (req, res) => {
-  const startTime = Date.now();
+const server = http.createServer((req, res) => {
   const requestId = (req.headers['x-request-id'] as string) || randomUUID();
   res.setHeader('X-Request-Id', requestId);
-
-  req.setTimeout(REQUEST_TIMEOUT_MS, () => {
-    if (!res.headersSent) {
-      res.writeHead(408, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ error: '요청 처리 시간 초과됨 (30초 제한)' }));
+  void dispatchRequest(req, res, requestId).catch((error: unknown) => {
+    try {
+      const kind = error instanceof Error ? error.name : typeof error;
+      console.error(`[mcp-platform] HTTP 요청 처리 실패함 (${requestId}, ${kind})`);
+      if (res.destroyed || res.writableEnded) return;
+      res.shouldKeepAlive = false;
+      if (res.headersSent) {
+        res.destroy();
+        return;
+      }
+      res.writeHead(500, {
+        'Content-Type': 'application/json',
+        Connection: 'close',
+      });
+      res.end(JSON.stringify({ error: 'Internal Server Error', requestId }));
+    } catch {
+      res.destroy();
     }
   });
+});
+
+async function dispatchRequest(
+  req: http.IncomingMessage,
+  res: http.ServerResponse,
+  requestId: string,
+): Promise<void> {
+  const startTime = Date.now();
 
   const url = new URL(req.url ?? '/', `http://${req.headers.host ?? 'localhost'}`);
   const pathname = url.pathname;
@@ -515,7 +740,13 @@ const server = http.createServer(async (req, res) => {
     }
     const statusGroup = `${Math.floor(res.statusCode / 100)}xx`;
     metrics.statusCodes[statusGroup] = (metrics.statusCodes[statusGroup] ?? 0) + 1;
-    metrics.endpoints[pathname] = (metrics.endpoints[pathname] ?? 0) + 1;
+    const endpointKey =
+      metrics.endpoints[pathname] !== undefined
+        ? pathname
+        : Object.keys(metrics.endpoints).length < 255 && pathname.length <= 256
+          ? pathname
+          : '__other__';
+    metrics.endpoints[endpointKey] = (metrics.endpoints[endpointKey] ?? 0) + 1;
   });
 
   // Host 헤더 유효성 검증
@@ -559,20 +790,35 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
-  // Bearer 토큰 검증 헬퍼 함수
-  const isAuthenticated = (): boolean => {
-    if (!bearerToken) return true;
-    const auth = req.headers.authorization;
-    if (!auth) return false;
-    const [scheme, token] = auth.split(' ');
-    return scheme?.toLowerCase() === 'bearer' && token === bearerToken;
+  const authorization = req.headers.authorization;
+  const matchesBearer = (expected: string | undefined): boolean => {
+    if (!expected || !authorization) return false;
+    const match = /^Bearer\s+(\S+)$/i.exec(authorization);
+    if (!match) return false;
+    const supplied = Buffer.from(match[1]);
+    const configured = Buffer.from(expected);
+    return supplied.length === configured.length && timingSafeEqual(supplied, configured);
   };
+  const bearerAuthenticated = matchesBearer(bearerToken);
+  const managementAuthenticated = bearerAuthenticated || matchesBearer(adminToken);
+  const publicHealthPaths = new Set(['/api/health', '/api/healthz', '/health', '/healthz']);
+
+  if (
+    pathname !== '/mcp' &&
+    !publicHealthPaths.has(pathname) &&
+    (bearerToken || adminToken) &&
+    !managementAuthenticated
+  ) {
+    res.writeHead(401, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ error: '관리 API 인증 토큰이 필요함' }));
+    return;
+  }
 
   // -------------------------------------------------------------------------
   // 4.1 표준 MCP Streamable HTTP 전송 엔드포인트 (/mcp)
   // -------------------------------------------------------------------------
   if (pathname === '/mcp') {
-    if (bearerToken && !isAuthenticated()) {
+    if (bearerToken && !bearerAuthenticated) {
       res.writeHead(401, { 'Content-Type': 'application/json' });
       res.end(
         JSON.stringify({
@@ -636,7 +882,13 @@ const server = http.createServer(async (req, res) => {
       while (true) {
         const { done, value } = await reader.read();
         if (done) break;
-        res.write(value);
+        if (!res.write(value)) {
+          await waitForResponseDrain(res);
+          if (res.destroyed) {
+            await reader.cancel().catch(() => undefined);
+            return;
+          }
+        }
       }
     }
     res.end();
@@ -713,7 +965,7 @@ const server = http.createServer(async (req, res) => {
   if (req.method === 'GET' && (pathname === '/api/servers' || pathname === '/servers')) {
     const cliScript = path.resolve(projectRoot, 'scripts/mcp-cli.sh');
     try {
-      const { stdout } = await execFileAsync(cliScript, ['servers']);
+      const { stdout } = await execFileAsync(cliScript, ['servers'], { timeout: REQUEST_TIMEOUT_MS });
       const servers = JSON.parse(stdout);
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ success: true, count: servers.length, servers }, null, 2));
@@ -728,7 +980,7 @@ const server = http.createServer(async (req, res) => {
   if (req.method === 'GET' && (pathname === '/api/cache/stats' || pathname === '/cache/stats')) {
     const cliScript = path.resolve(projectRoot, 'scripts/mcp-cli.sh');
     try {
-      const { stdout } = await execFileAsync(cliScript, ['cache', 'stats']);
+      const { stdout } = await execFileAsync(cliScript, ['cache', 'stats'], { timeout: REQUEST_TIMEOUT_MS });
       const stats = JSON.parse(stdout);
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ success: true, stats }, null, 2));
@@ -741,22 +993,19 @@ const server = http.createServer(async (req, res) => {
 
   // 관리자 전용 영속 캐시 초기화 (원격 기본 비활성화, 인증 필수임)
   if (req.method === 'POST' && (pathname === '/api/admin/cache/clear' || pathname === '/cache/clear')) {
-    const isLocalCall = isLoopbackAddress(req.socket.remoteAddress ?? '');
-    const authHeader = req.headers.authorization;
-    const isAuthorizedAdmin =
-      Boolean(adminToken && authHeader === `Bearer ${adminToken}`) ||
-      Boolean(!adminToken && isLocalCall && isAuthenticated());
-
-    if (pathname === '/cache/clear' && !isAuthorizedAdmin) {
-      res.writeHead(403, { 'Content-Type': 'application/json' });
+    if (pathname === '/cache/clear') {
+      res.writeHead(410, { 'Content-Type': 'application/json' });
       res.end(
         JSON.stringify({
           success: false,
-          error: '원격 /cache/clear 작업은 보안상 비활성화됨. 인증된 /api/admin/cache/clear 경로를 사용해야 함',
+          error: '/cache/clear 경로는 폐기됨. /api/admin/cache/clear를 사용해야 함',
         }),
       );
       return;
     }
+
+    const authHeader = req.headers.authorization;
+    const isAuthorizedAdmin = Boolean(adminToken && authHeader && matchesBearer(adminToken));
 
     if (!isAuthorizedAdmin) {
       res.writeHead(401, { 'Content-Type': 'application/json' });
@@ -766,7 +1015,7 @@ const server = http.createServer(async (req, res) => {
 
     const cliScript = path.resolve(projectRoot, 'scripts/mcp-cli.sh');
     try {
-      const { stdout } = await execFileAsync(cliScript, ['cache', 'clear']);
+      const { stdout } = await execFileAsync(cliScript, ['cache', 'clear'], { timeout: REQUEST_TIMEOUT_MS });
       const result = JSON.parse(stdout);
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ success: true, result }, null, 2));
@@ -781,7 +1030,7 @@ const server = http.createServer(async (req, res) => {
   if (req.method === 'GET' && (pathname === '/api/doctor' || pathname === '/doctor')) {
     const doctorScript = path.resolve(projectRoot, 'scripts/doctor.sh');
     try {
-      const { stdout } = await execFileAsync(doctorScript, []);
+      const { stdout } = await execFileAsync(doctorScript, [], { timeout: REQUEST_TIMEOUT_MS });
       res.writeHead(200, { 'Content-Type': 'text/plain; charset=utf-8' });
       res.end(stdout);
     } catch (err: any) {
@@ -834,7 +1083,14 @@ const server = http.createServer(async (req, res) => {
           version: '0.1.0',
           mcp_endpoint: '/mcp',
           workspace_files_enabled: enableWorkspaceHttp,
-          tools: WORKSPACE_TOOLS_DEFINITION,
+          tools: [
+            {
+              name: 'platform_status',
+              description: 'mcp-platform HTTP 게이트웨이의 상태를 반환함',
+            },
+            ...forwardedTools,
+            ...WORKSPACE_TOOLS_DEFINITION.filter((tool) => tool.enabled),
+          ],
         },
         null,
         2,
@@ -855,10 +1111,13 @@ const server = http.createServer(async (req, res) => {
     );
 
     const intervalId = setInterval(() => {
-      res.write(`: ping ${Date.now()}\n\n`);
+      if (!res.write(`: ping ${Date.now()}\n\n`)) {
+        clearInterval(intervalId);
+        res.end();
+      }
     }, 15000);
 
-    req.on('close', () => {
+    res.on('close', () => {
       clearInterval(intervalId);
     });
     return;
@@ -878,6 +1137,45 @@ const server = http.createServer(async (req, res) => {
   // 404 미지원 경로
   res.writeHead(404, { 'Content-Type': 'application/json' });
   res.end(JSON.stringify({ error: 'Not Found', path: pathname }));
+}
+
+server.requestTimeout = REQUEST_TIMEOUT_MS;
+server.headersTimeout = 10_000;
+server.keepAliveTimeout = 5_000;
+
+let shutdownPromise: Promise<void> | undefined;
+const shutdown = (): Promise<void> => {
+  if (shutdownPromise) return shutdownPromise;
+  shutdownPromise = (async () => {
+    server.closeAllConnections();
+    await new Promise<void>((resolve, reject) =>
+      server.close((error) => {
+        if (error && (error as NodeJS.ErrnoException).code !== 'ERR_SERVER_NOT_RUNNING') {
+          reject(error);
+        } else {
+          resolve();
+        }
+      }),
+    );
+    await httpMcpServer.close();
+  })();
+  return shutdownPromise;
+};
+
+const reportShutdownError = (error: unknown) => {
+  const kind = error instanceof Error ? error.name : typeof error;
+  console.error(`[mcp-platform] 종료 처리 실패함 (${kind})`);
+  process.exitCode = 1;
+};
+
+process.once('SIGINT', () => void shutdown().catch(reportShutdownError));
+process.once('SIGTERM', () => void shutdown().catch(reportShutdownError));
+server.on('error', (error) => {
+  const kind = error instanceof Error ? error.name : typeof error;
+  console.error(`[mcp-platform] HTTP 리스너 실행 실패함 (${kind})`);
+  void shutdown().catch(reportShutdownError).finally(() => {
+    process.exitCode = 1;
+  });
 });
 
 server.listen(PORT, HOST, () => {

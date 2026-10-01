@@ -7,7 +7,8 @@
       "transport": "stdio",
       "command": "/bin/bash",
       "args": ["scripts/run-corporate-intelligence.sh"],
-      "envPassthrough": ["DATA_GO_API_KEY", "API_KEY", "RAG_VLLM_URL", "RAG_API_KEY"]
+      "envPassthrough": ["DATA_GO_API_KEY", "API_KEY", "RAG_VLLM_URL", "RAG_API_KEY"],
+      "readOnlyTools": ["analyze_company_comprehensive"]
     },
     {
       "id": "internal_rag",
@@ -16,11 +17,18 @@
       "command": "/bin/bash",
       "args": ["scripts/run-internal-rag.sh"],
       "envPassthrough": ["RAG_VLLM_URL", "RAG_API_KEY"],
-      "allowWriteTools": false
+      "allowWriteTools": false,
+      "readOnlyTools": [
+        "rag_search_documents",
+        "rag_ask_ai",
+        "rag_list_documents",
+        "rag_get_document_detail"
+      ]
     },
     {
       "id": "playwright",
       "label": "Playwright browser automation",
+      "enabled": false,
       "transport": "stdio",
       "command": "npx",
       "args": [
@@ -49,7 +57,14 @@
       "transport": "stdio",
       "command": "/bin/bash",
       "args": ["scripts/run-data-go-pps.sh"],
-      "envPassthrough": ["DATA_GO_API_KEY", "API_KEY"]
+      "envPassthrough": ["DATA_GO_API_KEY", "API_KEY"],
+      "readOnlyTools": [
+        "search_bid_announcements",
+        "search_successful_bids",
+        "search_contracts",
+        "get_bid_detail",
+        "search_order_plans"
+      ]
     },
     {
       "id": "data_go_nps",
@@ -57,7 +72,8 @@
       "transport": "stdio",
       "command": "/bin/bash",
       "args": ["scripts/run-data-go-nps.sh"],
-      "envPassthrough": ["DATA_GO_API_KEY", "API_KEY"]
+      "envPassthrough": ["DATA_GO_API_KEY", "API_KEY"],
+      "readOnlyTools": ["search_business", "get_business_detail", "get_period_status"]
     },
     {
       "id": "data_go_nts",
@@ -65,7 +81,8 @@
       "transport": "stdio",
       "command": "/bin/bash",
       "args": ["scripts/run-data-go-nts.sh"],
-      "envPassthrough": ["DATA_GO_API_KEY", "API_KEY"]
+      "envPassthrough": ["DATA_GO_API_KEY", "API_KEY"],
+      "readOnlyTools": ["validate_business", "check_business_status", "batch_validate_businesses"]
     },
     {
       "id": "data_go_fsc",
@@ -73,7 +90,13 @@
       "transport": "stdio",
       "command": "/bin/bash",
       "args": ["scripts/run-data-go-fsc.sh"],
-      "envPassthrough": ["DATA_GO_API_KEY", "API_KEY"]
+      "envPassthrough": ["DATA_GO_API_KEY", "API_KEY"],
+      "readOnlyTools": [
+        "get_summary_financial_statement",
+        "get_balance_sheet",
+        "get_income_statement",
+        "search_company_financial_info"
+      ]
     },
     {
       "id": "data_go_catalog",
@@ -81,7 +104,8 @@
       "transport": "stdio",
       "command": "/bin/bash",
       "args": ["scripts/run-data-go-catalog.sh"],
-      "envPassthrough": ["DATA_GO_API_KEY", "API_KEY"]
+      "envPassthrough": ["DATA_GO_API_KEY", "API_KEY"],
+      "readOnlyTools": ["search_public_datasets"]
     },
     {
       "id": "food_safety",
@@ -89,7 +113,12 @@
       "transport": "stdio",
       "command": "/bin/bash",
       "args": ["scripts/run-data-go-food-safety.sh"],
-      "envPassthrough": ["FOOD_SAFETY_API_KEY", "FOOD_API_KEY"]
+      "envPassthrough": ["FOOD_SAFETY_API_KEY", "FOOD_API_KEY"],
+      "readOnlyTools": [
+        "search_food_products",
+        "search_food_manufacturing_reports",
+        "search_recalled_foods"
+      ]
     },
     {
       "id": "dart_filings",
@@ -97,7 +126,8 @@
       "transport": "stdio",
       "command": "/bin/bash",
       "args": ["scripts/run-dart-filings.sh"],
-      "envPassthrough": ["DART_API_KEY", "DATA_GO_API_KEY"]
+      "envPassthrough": ["DART_API_KEY", "DATA_GO_API_KEY"],
+      "readOnlyTools": ["search_dart_filings", "get_company_overview"]
     },
     {
       "id": "address_lookup",
@@ -105,7 +135,8 @@
       "transport": "stdio",
       "command": "/bin/bash",
       "args": ["scripts/run-address-lookup.sh"],
-      "envPassthrough": ["JUSO_API_KEY", "DATA_GO_API_KEY"]
+      "envPassthrough": ["JUSO_API_KEY", "DATA_GO_API_KEY"],
+      "readOnlyTools": ["search_address", "get_administrative_district"]
     },
     {
       "id": "smes_programs",
@@ -113,7 +144,8 @@
       "transport": "stdio",
       "command": "/bin/bash",
       "args": ["scripts/run-smes-programs.sh"],
-      "envPassthrough": ["BIZINFO_API_KEY", "DATA_GO_API_KEY"]
+      "envPassthrough": ["BIZINFO_API_KEY", "DATA_GO_API_KEY"],
+      "readOnlyTools": ["search_support_programs", "get_support_program_detail"]
     },
     {
       "id": "kipris_patents",
@@ -121,7 +153,8 @@
       "transport": "stdio",
       "command": "/bin/bash",
       "args": ["scripts/run-kipris-patents.sh"],
-      "envPassthrough": ["KIPRIS_API_KEY", "DATA_GO_API_KEY"]
+      "envPassthrough": ["KIPRIS_API_KEY", "DATA_GO_API_KEY"],
+      "readOnlyTools": ["search_patents", "get_patent_detail"]
     },
     {
       "id": "go_runtime",
@@ -129,7 +162,15 @@
       "transport": "stdio",
       "command": "/bin/bash",
       "args": ["scripts/run-mcp-go-server.sh"],
-      "allowWriteTools": false
+      "allowWriteTools": false,
+      "readOnlyTools": [
+        "greet",
+        "health_ping",
+        "system_metrics",
+        "batch_collect_bids",
+        "batch_validate_corporate",
+        "benchmark_parallel_collector"
+      ]
     }
   ]
 }

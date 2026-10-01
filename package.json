@@ -6,7 +6,7 @@
   "description": "A company-wide MCP platform for servers, clients, gateways, and data connectors",
   "scripts": {
     "build": "tsc",
-    "start": "node dist/servers/workspace-tools.js",
+    "start": "node dist/servers/mcp-gateway.js",
     "start:data-go": "node dist/servers/data-go-gateway.js",
     "start:mcp-gateway": "node dist/servers/mcp-gateway.js",
     "start:http-gateway": "node dist/servers/http-gateway.js",

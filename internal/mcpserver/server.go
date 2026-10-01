@@ -87,17 +87,17 @@ func New() *mcp.Server {
 
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "batch_collect_bids",
-		Description: "복수 키워드 및 기간에 대해 나라장터 입찰공고를 고루틴 워커 풀로 병렬 수집함",
+		Description: "실제 API를 호출하지 않고 데모용 합성 입찰공고를 생성해 병렬 처리 흐름을 보여줌",
 	}, batchCollectBids)
 
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "batch_validate_corporate",
-		Description: "다수 기업의 사업자등록번호 진위를 고루틴 병렬로 초고속 검증함",
+		Description: "사업자등록번호 체크섬 형식만 병렬 확인함. 실제 국세청 등록상태나 과세유형은 조회하지 않음",
 	}, batchValidateCorporate)
 
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "benchmark_parallel_collector",
-		Description: "순차 처리 대비 고루틴 병렬 처리의 가속비 및 성능 지표를 측정함",
+		Description: "합성 지연 작업에서 순차 처리와 병렬 처리 시간을 비교하는 로컬 데모 벤치마크임",
 	}, benchmarkParallelCollector)
 
 	return server

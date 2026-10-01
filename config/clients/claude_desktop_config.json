@@ -14,12 +14,6 @@
       "env": {
         "MCP_WORKSPACE_ROOT": "__WORKSPACE_ROOT__"
       }
-    },
-    "data-go-portal": {
-      "command": "/bin/bash",
-      "args": [
-        "__MCP_PLATFORM_ROOT__/scripts/run-data-go-portal.sh"
-      ]
     }
   }
 }

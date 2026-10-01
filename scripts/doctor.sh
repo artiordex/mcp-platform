@@ -145,20 +145,45 @@ fi
 echo ""
 echo "--- 6. 환경 변수 및 API 키 점검 ---"
 ENV_FILE="$MCP_ROOT/.env"
+env_key_is_configured() {
+  python3 - "$ENV_FILE" "$1" <<'PY'
+import sys
+from pathlib import Path
+
+env_path = Path(sys.argv[1])
+key = sys.argv[2]
+for line in env_path.read_text(encoding="utf-8").splitlines():
+    stripped = line.strip()
+    if not stripped or stripped.startswith("#") or "=" not in stripped:
+        continue
+    name, value = stripped.split("=", 1)
+    if name.strip() != key:
+        continue
+    value = value.strip()
+    if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
+        value = value[1:-1]
+    lowered = value.lower()
+    if not value or lowered.startswith(("replace-with-", "your-", "your_", "changeme", "todo")):
+        raise SystemExit(1)
+    raise SystemExit(0)
+raise SystemExit(1)
+PY
+}
+
 if [[ -f "$ENV_FILE" ]]; then
   report_ok ".env 설정 파일 존재함"
-  if grep -q "DATA_GO_API_KEY=" "$ENV_FILE" && ! grep -q "DATA_GO_API_KEY=$" "$ENV_FILE"; then
+  if env_key_is_configured DATA_GO_API_KEY; then
     report_ok "DATA_GO_API_KEY 설정됨"
   else
     report_warn "DATA_GO_API_KEY가 비어 있거나 미설정됨"
   fi
-  if grep -q "FOOD_SAFETY_API_KEY=" "$ENV_FILE" && ! grep -q "FOOD_SAFETY_API_KEY=$" "$ENV_FILE"; then
+  if env_key_is_configured FOOD_SAFETY_API_KEY; then
     report_ok "FOOD_SAFETY_API_KEY 설정됨"
   else
     report_warn "FOOD_SAFETY_API_KEY가 비어 있거나 미설정됨"
   fi
 else
-  report_warn ".env 파일이 없음 (.env.example 참조하여 생성 권장함)"
+  report_warn ".env 파일이 없음 (config/data-go.env.example을 복사하여 생성 권장함)"
 fi
 
 # 7. 클라이언트 설정 점검
