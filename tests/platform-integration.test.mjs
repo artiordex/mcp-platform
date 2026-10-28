@@ -34,14 +34,14 @@ test('generic gateway routes configured MCP tools and filters child environment'
 
 test('Data.go gateway starts all public-data MCP servers', () => {
   const result = runCheck('data-go');
-  assert.equal(result.total_tools, 19);
+  assert.equal(result.total_tools, 39);
   assert.deepEqual(result.by_server, {
     nps: 3,
     nts: 3,
-    pps: 5,
+    pps: 20,
     fsc: 4,
     public_data_catalog: 1,
-    food_safety: 3,
+    food_safety: 8,
   });
 });
 

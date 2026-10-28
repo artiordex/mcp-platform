@@ -147,10 +147,10 @@ def check_data_go_gateway() -> dict[str, Any]:
     expected_counts = {
         "nps": 3,
         "nts": 3,
-        "pps": 5,
+        "pps": 20,
         "fsc": 4,
         "public_data_catalog": 1,
-        "food_safety": 3,
+        "food_safety": 8,
     }
     try:
         tools = request(process, "tools/list").get("tools", [])

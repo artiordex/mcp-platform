@@ -1,6 +1,6 @@
 # MCP Platform (사내 통합 MCP 게이트웨이 및 데이터 커넥터)
 
-사내 표준 AI 클라이언트(Codex, Claude Desktop, Cursor, VS Code 등)에게 공공데이터(국민연금, 국세청, 조달청 나라장터, 금융위, DART 전자공시, 행정안전부 도로명주소, 중기부 지원사업, 특허청 KIPRIS), 사내 RAG-vLLM 지식 검색, 로컬 워크스페이스 도구를 단일 엔드포인트로 통합 제공하는 단일 사용자용 MCP 프로토타입 플랫폼임.
+사내 표준 AI 클라이언트(Codex, Claude Desktop, Cursor, VS Code 등)에게 공공데이터(국민연금, 국세청, 조달청 나라장터, 식품안전나라, 금융위, DART 전자공시, 행정안전부 도로명주소, 중기부 지원사업, 특허청 KIPRIS), 사내 RAG-vLLM 지식 검색, 로컬 워크스페이스 도구를 단일 엔드포인트로 통합 제공하는 단일 사용자용 MCP 프로토타입 플랫폼임.
 
 ---
 
@@ -54,6 +54,19 @@ mcp-platform/
   - 쓰기 도구와 분류되지 않은 도구는 기본 비활성화이며, `MCP_ALLOW_WRITE_TOOLS=true` 또는 서버별 `allowWriteTools: true`를 지정해야 활성화됨. `config/mcp-servers.example.json`에는 현재 조회 도구 목록을 서버별로 명시함.
   - 원격 서버는 `enabledTools` 허용 목록을 반드시 지정해야 하며, 원격 HTTP 연결에는 HTTPS를 사용해야 함 (평문 HTTP는 루프백 주소만 허용됨). 로컬 명령 서버도 신뢰할 수 있는 실행 파일만 등록해야 함.
 
+### 2.1.1 나라장터 커넥터
+- `pps` 서버는 입찰공고·낙찰·계약·발주계획 조회와 제안 분석에 더해 조달통계(14개), 물품목록(12개), 종합쇼핑몰(9개) OpenAPI 오퍼레이션을 제공함.
+- `crawl_list`, 상세 속성 조회, 연도별 통계, 상품 검색, API 오퍼레이션 탐색 및 페이징 안내 도구를 제공함.
+- API별 파라미터는 `parameters` 객체에 나라장터의 원래 파라미터명으로 전달함. 서버가 서비스 키, 페이지 크기, 페이지 번호를 설정함.
+- API 파라미터·값·검색 패턴 리소스 3개와 분석 워크플로우 프롬프트 4개를 게이트웨이에서 전달함.
+- 인증 키는 `NARAMARKET_SERVICE_KEY`를 우선 사용하고, 없으면 `DATA_GO_API_KEY` 또는 `API_KEY`를 사용함. `NARAMARKET_SERVICE_KEY`는 원본 프로젝트 호환용 변수명이며, 값은 공공데이터포털에서 발급한 API 키임. 키 갱신과 별개로 나라장터 API별 활용신청 상태를 확인해야 함.
+
+### 2.1.2 식품안전나라 커넥터
+- `search_food_safety_services`가 식품안전나라의 공개 카탈로그에서 API ID와 분류를 검색함.
+- `get_food_safety_service_info`가 서비스별 검색 파라미터와 출력 필드를 안내함. API별 파라미터 이름은 서로 다르므로 먼저 이 도구로 문서를 확인함.
+- `call_food_safety_api`가 확인한 서비스 ID와 파라미터를 사용해 공식 JSON API를 호출함. 원재료 코드, 레시피, 제품, 품목제조보고, 회수 정보 전용 조회 도구도 함께 제공함.
+- 인증 키 환경변수는 `FOOD_SAFETY_API_KEY`이며, 공공데이터포털의 `DATA_GO_API_KEY`와 별도로 식품안전나라에서 신청한 키를 사용함. 인증키 발급과 서비스별 OpenAPI 이용신청은 각각 확인해야 함.
+
 ### 2.2 리소스 (Resources) 전달
 - **네임스페이스 URI**: `mcp://${serverId}/${uri_path}` 규칙으로 URI 충돌을 방지함.
 - 제공 리소스:
@@ -63,6 +76,7 @@ mcp-platform/
   - `mcp://dart_filings/dart/report-types`: DART 공시 보고서 분류 체계 리소스임.
   - `mcp://smes_programs/smes/categories`: 중기부 지원사업 7대 분류 체계 리소스임.
   - `mcp://kipris_patents/kipris/ipc-sections`: 특허청 IPC 8대 섹션 표준 체계 리소스임.
+  - `data_go://pps/guide/api-parameter-requirements`, `data_go://pps/guide/parameter-value-examples`, `data_go://pps/guide/common-search-patterns`: 나라장터 API 검색 가이드 리소스임.
 
 ### 2.3 프롬프트 (Prompts) 전달
 - **네임스페이스 이름**: `mcp_${serverId}_${promptName}` 또는 `data_go_${serverId}_${promptName}`로 노출함.
@@ -70,6 +84,9 @@ mcp-platform/
 - 제공 프롬프트:
   - `mcp_internal_rag_draft_internal_memo`: 사내 규정을 검색하여 표준 기안문 양식을 작성하는 프롬프트임.
   - `mcp_data_go_pps_analyze_bid_proposal`: 나라장터 입찰공고 분석 및 제안 전략 수립 프롬프트임.
+  - `data_go_pps_workflow_guide`: 공공조달 데이터를 순서대로 탐색하는 프롬프트임.
+  - `data_go_pps_parameter_selection_guide`: API 파라미터와 검색 범위를 고르는 프롬프트임.
+  - `data_go_pps_real_world_query_examples`: 조달 분석 시나리오별 질의 예시 프롬프트임.
   - `mcp_dart_filings_audit_company_disclosure`: DART 공시 및 재무 상태 분석 프롬프트임.
   - `mcp_smes_programs_match_company_policy_funds`: 기업 제원 맞춤형 정부지원사업 매칭 프롬프트임.
   - `mcp_kipris_patents_analyze_patent_competitiveness`: 기업 특허 포트폴리오 기술 경쟁력 분석 프롬프트임.

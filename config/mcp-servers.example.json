@@ -150,13 +150,29 @@
       "transport": "stdio",
       "command": "/bin/bash",
       "args": ["scripts/run-data-go-pps.sh"],
-      "envPassthrough": ["DATA_GO_API_KEY", "API_KEY"],
+      "envPassthrough": ["NARAMARKET_SERVICE_KEY", "DATA_GO_API_KEY", "API_KEY"],
       "readOnlyTools": [
         "search_bid_announcements",
         "search_successful_bids",
         "search_contracts",
         "get_bid_detail",
-        "search_order_plans"
+        "search_order_plans",
+        "crawl_list",
+        "get_detailed_attributes",
+        "server_info",
+        "call_public_data_standard_api",
+        "call_procurement_statistics_api",
+        "call_product_list_api",
+        "call_shopping_mall_api",
+        "get_all_api_services_info",
+        "get_api_operations",
+        "call_api_with_pagination_support",
+        "get_data_exploration_guide",
+        "get_recent_bid_announcements",
+        "get_successful_bids_by_business_type",
+        "get_procurement_statistics_by_year",
+        "search_shopping_mall_products",
+        "health_check"
       ]
     },
     {
@@ -208,6 +224,11 @@
       "args": ["scripts/run-data-go-food-safety.sh"],
       "envPassthrough": ["FOOD_SAFETY_API_KEY", "FOOD_API_KEY"],
       "readOnlyTools": [
+        "search_food_safety_services",
+        "get_food_safety_service_info",
+        "call_food_safety_api",
+        "search_food_raw_material_codes",
+        "search_food_recipes",
         "search_food_products",
         "search_food_manufacturing_reports",
         "search_recalled_foods"

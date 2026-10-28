@@ -82,6 +82,7 @@ export PYTHONPATH="$connector_root${PYTHONPATH:+:$PYTHONPATH}"
 
 # Load the repository-level .env while preserving explicit parent values.
 data_go_api_key_override="${DATA_GO_API_KEY:-}"
+naramarket_service_key_override="${NARAMARKET_SERVICE_KEY:-}"
 api_key_override="${API_KEY:-}"
 food_safety_api_key_override="${FOOD_SAFETY_API_KEY:-}"
 food_api_key_override="${FOOD_API_KEY:-}"
@@ -91,6 +92,11 @@ if [[ -f "$mcp_root/.env" ]]; then
 fi
 if [[ -n "$data_go_api_key_override" ]]; then
   export DATA_GO_API_KEY="$data_go_api_key_override"
+fi
+if [[ -n "$naramarket_service_key_override" ]]; then
+  export NARAMARKET_SERVICE_KEY="$naramarket_service_key_override"
+elif [[ -n "${NARAMARKET_SERVICE_KEY:-}" ]]; then
+  export NARAMARKET_SERVICE_KEY
 fi
 if [[ -n "$api_key_override" ]]; then
   export API_KEY="$api_key_override"

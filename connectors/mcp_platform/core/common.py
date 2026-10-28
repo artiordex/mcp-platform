@@ -37,6 +37,7 @@ class DataGoError(RuntimeError):
 _SECRET_ENV_NAMES = (
     "API_KEY",
     "DATA_GO_API_KEY",
+    "NARAMARKET_SERVICE_KEY",
     "FOOD_SAFETY_API_KEY",
     "FOOD_API_KEY",
 )
@@ -75,6 +76,68 @@ def service_key() -> str:
     return key
 
 
+def _provider_error(payload: Any) -> str | None:
+    """HTTP 오류 본문에서 인증/서비스 오류 코드와 메시지만 안전하게 추출함"""
+    if not isinstance(payload, Mapping):
+        return None
+
+    candidates: list[Mapping[str, Any]] = []
+    gateway = payload.get("OpenAPI_ServiceResponse")
+    if isinstance(gateway, Mapping):
+        header = gateway.get("cmmMsgHeader")
+        if isinstance(header, Mapping):
+            candidates.append(header)
+
+    response = payload.get("response")
+    if isinstance(response, Mapping):
+        header = response.get("header")
+        if isinstance(header, Mapping):
+            candidates.append(header)
+
+    candidates.append(payload)
+    for candidate in candidates:
+        code = (
+            candidate.get("resultCode")
+            or candidate.get("returnReasonCode")
+            or candidate.get("statusCode")
+            or candidate.get("code")
+        )
+        message = (
+            candidate.get("resultMsg")
+            or candidate.get("returnAuthMsg")
+            or candidate.get("message")
+            or candidate.get("msg")
+        )
+        if code is None:
+            continue
+        if str(code) in {"00", "0", "200", "OK", "ok"}:
+            continue
+        label = f" [{code}]" if code is not None else ""
+        detail = f"API 제공기관 오류{label}"
+        if message is not None:
+            detail += f": {message}"
+        return redact_sensitive(detail)
+    return None
+
+
+def _http_error(response: httpx.Response, *, expected_format: str = "json") -> DataGoError:
+    """HTTP 상태 코드와 제공기관의 구조화 오류를 인증키 노출 없이 반환함"""
+    payload: Any = None
+    try:
+        if expected_format == "xml":
+            payload = parse_xml(response.text)
+        else:
+            payload = response.json()
+    except Exception:
+        pass
+    detail = _provider_error(payload)
+    if detail:
+        return DataGoError(
+            redact_sensitive(f"API 엔드포인트 HTTP {response.status_code}: {detail}")
+        )
+    return DataGoError(f"API 엔드포인트에서 HTTP {response.status_code} 오류를 반환함")
+
+
 def as_list(value: Any) -> list[Any]:
     """단일 항목 또는 매핑 구조를 리스트 형태로 표준화함"""
     if value is None:
@@ -97,6 +160,10 @@ def response_body(payload: Any) -> dict[str, Any]:
     """
     if not isinstance(payload, Mapping):
         raise DataGoError("API 응답이 JSON 객체 형식이 아님")
+
+    provider_error = _provider_error(payload)
+    if provider_error:
+        raise DataGoError(redact_sensitive(provider_error))
 
     response = payload.get("response", payload)
     if not isinstance(response, Mapping):
@@ -138,9 +205,7 @@ async def get_json(
             response.raise_for_status()
             return response.json()
         except httpx.HTTPStatusError as exc:
-            raise DataGoError(
-                f"API 엔드포인트에서 HTTP {exc.response.status_code} 오류를 반환함"
-            ) from exc
+            raise _http_error(exc.response) from exc
         except httpx.RequestError as exc:
             raise DataGoError("API 엔드포인트에 연결할 수 없음") from exc
         except ValueError as exc:
@@ -163,12 +228,11 @@ async def post_json(
                 json=json_body,
                 headers=dict(headers or {}),
             )
-            response.raise_for_status()
+            if response.is_error:
+                raise _http_error(response)
             return response.json()
         except httpx.HTTPStatusError as exc:
-            raise DataGoError(
-                f"API 엔드포인트에서 HTTP {exc.response.status_code} 오류를 반환함"
-            ) from exc
+            raise _http_error(exc.response) from exc
         except httpx.RequestError as exc:
             raise DataGoError("API 엔드포인트에 연결할 수 없음") from exc
         except ValueError as exc:
@@ -185,14 +249,13 @@ async def get_xml(
     async with httpx.AsyncClient(timeout=HTTP_TIMEOUT, follow_redirects=True) as client:
         try:
             response = await client.get(url, params=dict(params or {}), headers=dict(headers or {}))
-            response.raise_for_status()
+            if response.is_error:
+                raise _http_error(response, expected_format="xml")
             return parse_xml_envelope(response.text)
         except DataGoError:
             raise
         except httpx.HTTPStatusError as exc:
-            raise DataGoError(
-                f"API 엔드포인트에서 HTTP {exc.response.status_code} 오류를 반환함"
-            ) from exc
+            raise _http_error(exc.response, expected_format="xml") from exc
         except httpx.RequestError as exc:
             raise DataGoError("API 엔드포인트에 연결할 수 없음") from exc
 
